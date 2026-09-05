@@ -1,0 +1,3 @@
+## Setlhoa Cash Solutions Reminders Queue Plan
+- [x] Correct all incoming date parsing to day-first semantics, apply nonblank in-memory maturity and milestone fallbacks, and re-bucket dashboard records by the corrected issue month.
+- [x] Add a responsive Reminders Queue navigation tab with urgency-sorted active loans, stage-colored countdown badges, and per-row WhatsApp notices using the matching exact template.

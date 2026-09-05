@@ -1,0 +1,554 @@
+{
+  "version": 4,
+  "app_title": "Setlhoa Pawn Intelligence System Plan",
+  "nav": {
+    "placement": "none",
+    "items": []
+  },
+  "pages": [
+    {
+      "id": "page-77dbb2c5",
+      "name": "Management & Executive Dashboard",
+      "route": "/",
+      "item_ref": {
+        "index": 0,
+        "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+      },
+      "blocks": [
+        {
+          "id": "dashboard-header",
+          "type": "header",
+          "label": "Setlhoa Cash Solutions",
+          "hint": "Internal pawn management and business intelligence workspace with Google sync health and last refreshed time.",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "workspace-tabs",
+          "type": "tabs",
+          "label": "Seven-tab workspace navigation",
+          "hint": "Dashboard, Active Ledger, Payments, Liquidation, Customers, Vehicle Valuation, Electronics Valuation.",
+          "x": 0,
+          "y": 1,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "dashboard-controls",
+          "type": "form",
+          "label": "Reporting month and sync controls",
+          "hint": "Month selector, manual refresh, and Sheets/Calendar connection status.",
+          "x": 0,
+          "y": 2,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "kpi-deployed",
+          "type": "kpi",
+          "label": "Monthly Deployed Capital",
+          "hint": "Principal disbursed in the selected month.",
+          "x": 0,
+          "y": 3,
+          "w": 3,
+          "h": 2,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "kpi-interest",
+          "type": "kpi",
+          "label": "Monthly Realized Interest",
+          "hint": "Interest collected from settled and extended loans.",
+          "x": 3,
+          "y": 3,
+          "w": 3,
+          "h": 2,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "kpi-liquidation",
+          "type": "kpi",
+          "label": "Liquidation Profit",
+          "hint": "Estimated market value less principal for defaulted assets.",
+          "x": 6,
+          "y": 3,
+          "w": 3,
+          "h": 2,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "kpi-active",
+          "type": "kpi",
+          "label": "Active Capital Out",
+          "hint": "Current principal across live loans.",
+          "x": 9,
+          "y": 3,
+          "w": 3,
+          "h": 2,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "status-chart",
+          "type": "chart_bar",
+          "label": "Portfolio Status Distribution",
+          "hint": "Visible percentage bars for Active, Settled, Extended, and Defaulted loan records.",
+          "x": 0,
+          "y": 5,
+          "w": 8,
+          "h": 4,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "calendar-monitor",
+          "type": "card",
+          "label": "Reminder Schedule Monitor",
+          "hint": "Day 27, Day 30, and Day 35 reminder counts, next reminder, timezone, and reconciliation health.",
+          "x": 8,
+          "y": 5,
+          "w": 4,
+          "h": 4,
+          "item_ref": {
+            "index": 0,
+            "text": "Create the secure Google Sheets and Calendar synchronization foundation plus the responsive seven-tab workspace and executive dashboard, using a Botswana-focused operations-room visual identity with deep charcoal, warm cash-gold, emerald status accents, compact tabular typography, and a capital/status visualization centerpiece; include live KPI calculations, month filtering, status distribution, loading/empty/error states, and 09:00 Africa/Gaborone Day 27, 30, and 35 reminder reconciliation."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    },
+    {
+      "id": "page-0ef86bf7",
+      "name": "Active Ledger & Payment Operations",
+      "route": "/",
+      "item_ref": {
+        "index": 1,
+        "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+      },
+      "blocks": [
+        {
+          "id": "ledger-header",
+          "type": "header",
+          "label": "Active Pawn Operations",
+          "hint": "Live operational view of Jotform-originated pawn tickets.",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "ledger-tabs",
+          "type": "tabs",
+          "label": "Seven-tab workspace navigation",
+          "hint": "Dashboard, Active Ledger, Payments, Liquidation, Customers, Vehicle Valuation, Electronics Valuation.",
+          "x": 0,
+          "y": 1,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "ledger-filters",
+          "type": "form",
+          "label": "Ledger search and filters",
+          "hint": "Search ticket or customer and filter by live status or due date.",
+          "x": 0,
+          "y": 2,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "ledger-table",
+          "type": "table",
+          "label": "Active Pawn Ledger",
+          "hint": "Interactive, scrollable live Google Sheets records with selected ticket state.",
+          "x": 0,
+          "y": 3,
+          "w": 12,
+          "h": 5,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "whatsapp-form",
+          "type": "form",
+          "label": "WhatsApp Notice Composer",
+          "hint": "Ticket, notice type, message preview, and pre-filled wa.me action using Botswana country code 267.",
+          "x": 0,
+          "y": 8,
+          "w": 4,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "status-form",
+          "type": "form",
+          "label": "Ticket Status Updater",
+          "hint": "Settle, extend 30 days, or default with confirmation and resulting Calendar action.",
+          "x": 4,
+          "y": 8,
+          "w": 4,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "delete-form",
+          "type": "form",
+          "label": "Delete Ticket",
+          "hint": "Destructive ticket removal with explicit confirmation and Calendar purge.",
+          "x": 8,
+          "y": 8,
+          "w": 4,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "payment-form",
+          "type": "form",
+          "label": "Partial Payment & Extension Manager",
+          "hint": "Ticket selection, payment type and amount, payment date, recalculated principal, interest, and due date preview.",
+          "x": 0,
+          "y": 12,
+          "w": 8,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "payment-preview",
+          "type": "card",
+          "label": "Updated Loan Snapshot",
+          "hint": "Before/after balances, interest, maturity, and scheduled reminders.",
+          "x": 8,
+          "y": 12,
+          "w": 4,
+          "h": 4,
+          "item_ref": {
+            "index": 1,
+            "text": "Build the Active Pawn Ledger and Partial Payment & Extension Manager with searchable live records, ticket selection, Botswana WhatsApp notice links, validated status transitions, settlement/default/deletion actions, payment logging, balance and interest recalculation, due-date updates, and matching Calendar event cleanup/rescheduling."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    },
+    {
+      "id": "page-613b5e28",
+      "name": "Liquidation & Customer Intelligence",
+      "route": "/",
+      "item_ref": {
+        "index": 2,
+        "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+      },
+      "blocks": [
+        {
+          "id": "recovery-header",
+          "type": "header",
+          "label": "Recovery & Customer Intelligence",
+          "hint": "Asset realization and borrower history tools.",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "recovery-tabs",
+          "type": "tabs",
+          "label": "Seven-tab workspace navigation",
+          "hint": "Dashboard, Active Ledger, Payments, Liquidation, Customers, Vehicle Valuation, Electronics Valuation.",
+          "x": 0,
+          "y": 1,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "liquidation-filters",
+          "type": "form",
+          "label": "Liquidation queue filters",
+          "hint": "Search assets and filter by overdue age or margin.",
+          "x": 0,
+          "y": 2,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "liquidation-table",
+          "type": "table",
+          "label": "Defaulted Asset Queue",
+          "hint": "Item, original loan, market value, recommended selling price, liquidation margin, and days overdue.",
+          "x": 0,
+          "y": 3,
+          "w": 8,
+          "h": 5,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "sale-form",
+          "type": "form",
+          "label": "Record Liquidation Sale",
+          "hint": "Selected ticket, sale date, final revenue, calculated realized profit, and sold confirmation.",
+          "x": 8,
+          "y": 3,
+          "w": 4,
+          "h": 5,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "customer-search",
+          "type": "form",
+          "label": "Customer Lookup",
+          "hint": "Search by Omang/passport number or mobile number.",
+          "x": 0,
+          "y": 8,
+          "w": 5,
+          "h": 2,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "customer-profile",
+          "type": "card",
+          "label": "Credit Rating Profile",
+          "hint": "Risk badge with total loans, timely settlements, extensions, defaults, and concise rating rationale.",
+          "x": 5,
+          "y": 8,
+          "w": 7,
+          "h": 3,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "customer-history",
+          "type": "table",
+          "label": "Customer Loan History",
+          "hint": "Chronological ticket history with status, dates, amounts, and outcomes.",
+          "x": 0,
+          "y": 11,
+          "w": 12,
+          "h": 4,
+          "item_ref": {
+            "index": 2,
+            "text": "Build the Liquidation & Overdue Asset Queue and Customer History & Credit Rating tabs with defaulted-asset filtering, margin and recommended-price analysis, sold/revenue capture, identity/mobile search, historical performance summaries, and automatic Good Standing, Moderate Risk, or High Risk badges."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    },
+    {
+      "id": "page-cb21c2f5",
+      "name": "Vehicle & Electronics Valuation",
+      "route": "/",
+      "item_ref": {
+        "index": 3,
+        "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+      },
+      "blocks": [
+        {
+          "id": "valuation-header",
+          "type": "header",
+          "label": "Collateral Valuation Desk",
+          "hint": "Fast, policy-aligned lending estimates for frontline staff.",
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "valuation-tabs",
+          "type": "tabs",
+          "label": "Seven-tab workspace navigation",
+          "hint": "Dashboard, Active Ledger, Payments, Liquidation, Customers, Vehicle Valuation, Electronics Valuation.",
+          "x": 0,
+          "y": 1,
+          "w": 12,
+          "h": 1,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "vehicle-inputs",
+          "type": "form",
+          "label": "Vehicle Valuation Inputs",
+          "hint": "Second-hand market value with fixed 40% LTV and 15% monthly interest policy.",
+          "x": 0,
+          "y": 2,
+          "w": 5,
+          "h": 3,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "vehicle-results",
+          "type": "card",
+          "label": "Vehicle Deal Summary",
+          "hint": "Maximum safe loan, 30-day repayment, and projected default profit.",
+          "x": 5,
+          "y": 2,
+          "w": 7,
+          "h": 3,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "electronics-inputs",
+          "type": "form",
+          "label": "Electronics Valuation Inputs",
+          "hint": "Second-hand market value with fixed 40% LTV and 30% monthly interest policy.",
+          "x": 0,
+          "y": 5,
+          "w": 5,
+          "h": 3,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "electronics-results",
+          "type": "card",
+          "label": "Electronics Deal Summary",
+          "hint": "Maximum safe loan, 30-day repayment, and projected default profit.",
+          "x": 5,
+          "y": 5,
+          "w": 7,
+          "h": 3,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        },
+        {
+          "id": "formula-reference",
+          "type": "card",
+          "label": "Policy Formula Reference",
+          "hint": "Plain-language LTV, interest, and default-profit formulas with Botswana pula formatting.",
+          "x": 0,
+          "y": 8,
+          "w": 12,
+          "h": 2,
+          "item_ref": {
+            "index": 3,
+            "text": "Build the Vehicle and Electronics Valuation Calculator tabs with 40% LTV rules, category-specific monthly interest, maximum-loan, repayment, and projected-default-profit outputs; finish responsive behavior, accessibility, confirmations for destructive actions, and clear integration health feedback across all tabs."
+          },
+          "type_source": "palette"
+        }
+      ],
+      "deleted_ids": []
+    }
+  ],
+  "attached_to_plan": false
+}

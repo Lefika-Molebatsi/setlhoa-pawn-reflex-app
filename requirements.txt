@@ -1,0 +1,10 @@
+
+reflex[db]==0.9.8
+gspread
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+pytz
+python-dotenv
+xy[reflex]==0.0.7
