@@ -1,5 +1,5 @@
 
-reflex[db]==0.9.8
+reflex[db]==0.9.11.post1
 gspread
 google-auth
 google-auth-oauthlib

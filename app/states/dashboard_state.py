@@ -19,12 +19,8 @@ class LoanRecord(TypedDict):
     interest_rate_display: str
     day_23: str
     day_23_status: str
-    day_27: str
-    day_27_status: str
     day_30_action: str
     day_30_status: str
-    day_32: str
-    day_32_status: str
     day_35: str
     day_35_status: str
     daily_penalty: float
@@ -58,11 +54,9 @@ class LoanRecord(TypedDict):
 
 
 NOTICE_TEMPLATES: dict[str, str] = {
-    "Pre-Due": "Hello. A friendly reminder that your loan {ticket} is due in 3 days. To settle or extend your loan, please contact us at 74927495/72796888.",
+    "Pre-Due": "Hello. A friendly reminder that your loan {ticket} is due in 7 days. To settle or extend your loan, please contact us at 74927495/72796888.",
     "Due Today": "Hello. Your loan {ticket} is due Today. Please arrange payment today to maintain your loan in good standing. Call/WhatsApp 74927495/72796888 for bank/e-wallet details.",
     "Final Warning": "Hello. Your loan ticket {ticket} is now 5 days overdue. Please settle by the end of the day to safeguard your item from liquidation. Contact us immediately at 74927495/72796888.",
-    "Courtesy": "Hello. A courtesy reminder that your loan {ticket} matures in 7 days. To plan your settlement or an extension, please contact us at 74927495/72796888.",
-    "Overdue": "Hello. Your loan ticket {ticket} is now 2 days overdue and daily penalties are accruing. Please settle as soon as possible to protect your item. Contact us at 74927495/72796888.",
 }
 
 
@@ -81,12 +75,8 @@ EMPTY_RECORD: LoanRecord = {
     "interest_rate_display": "0%",
     "day_23": "",
     "day_23_status": "",
-    "day_27": "",
-    "day_27_status": "",
     "day_30_action": "",
     "day_30_status": "",
-    "day_32": "",
-    "day_32_status": "",
     "day_35": "",
     "day_35_status": "",
     "daily_penalty": 0.0,
@@ -137,44 +127,31 @@ class ReminderRow(TypedDict):
 
 
 def _queue_stage(countdown_days: int) -> tuple[str, str, str]:
-    """Return (stage, badge color key, display label) for a countdown value."""
-    if countdown_days < 0:
-        overdue = abs(countdown_days)
-        unit = "day" if overdue == 1 else "days"
-        return (
-            "Overdue Stage",
-            "dark-red",
-            f"{overdue} {unit} overdue · Overdue Stage",
-        )
+    """Return the strict milestone stage or a neutral queue display state."""
+    if countdown_days == 7:
+        return ("Day 23 Courtesy", "blue", "Day 23 · 7 days remaining")
     if countdown_days == 0:
-        return ("Due Today", "red", "Due today · 0 days remaining")
-    if countdown_days <= 3:
-        unit = "day" if countdown_days == 1 else "days"
+        return ("Day 30 Due Today", "red", "Day 30 · Due today")
+    if countdown_days == -5:
+        return ("Day 35 Final Warning", "dark-red", "Day 35 · 5 days overdue")
+    if countdown_days > 7:
         return (
-            "Pre-Due Stage",
-            "orange",
-            f"{countdown_days} {unit} remaining · Pre-Due Stage",
-        )
-    if countdown_days <= 7:
-        return (
-            "Courtesy Stage",
-            "blue",
-            f"{countdown_days} days remaining · Courtesy Stage",
+            "On Track",
+            "green",
+            f"{countdown_days} days remaining · On Track",
         )
     return (
-        "On Track",
-        "green",
-        f"{countdown_days} days remaining · On Track",
+        "Between Milestones",
+        "orange",
+        f"{abs(countdown_days)} days from next milestone · Between Milestones",
     )
 
 
 def _queue_notice_type(countdown_days: int) -> str:
-    """Map a countdown value to the exact NOTICE_TEMPLATES key."""
-    if countdown_days < 0:
-        return "Final Warning"
-    if countdown_days == 0:
-        return "Due Today"
-    return "Pre-Due"
+    """Return a notice key only for an exact actionable countdown."""
+    return {7: "Pre-Due", 0: "Due Today", -5: "Final Warning"}.get(
+        countdown_days, ""
+    )
 
 
 def _whatsapp_link(mobile: str, ticket: str, countdown_days: int) -> str:
@@ -182,7 +159,10 @@ def _whatsapp_link(mobile: str, ticket: str, countdown_days: int) -> str:
     normalized = _normalize_mobile(mobile)
     if not normalized:
         return ""
-    message = _notice_text(_queue_notice_type(countdown_days), ticket)
+    notice_type = _queue_notice_type(countdown_days)
+    if not notice_type:
+        return ""
+    message = _notice_text(notice_type, ticket)
     return f"https://wa.me/267{normalized}?text={quote(message)}"
 
 
@@ -201,43 +181,25 @@ REMINDER_STAGES: tuple[ReminderStage, ...] = (
         "reminder_type": "Day 23 Courtesy",
         "title_prefix": "COURTESY REMINDER",
         "day_label": "Day 23",
-        "offset": 23,
+        "offset": -7,
         "summary_key": "day_23",
-        "notice_key": "Courtesy",
-        "milestone_field": "day_23",
-    },
-    {
-        "reminder_type": "Day 27 Pre-Due",
-        "title_prefix": "PRE-DUE WARNING",
-        "day_label": "Day 27",
-        "offset": 27,
-        "summary_key": "day_27",
         "notice_key": "Pre-Due",
-        "milestone_field": "day_27",
+        "milestone_field": "day_23",
     },
     {
         "reminder_type": "Day 30 Due Today",
         "title_prefix": "DUE TODAY",
         "day_label": "Day 30",
-        "offset": 30,
+        "offset": 0,
         "summary_key": "day_30",
         "notice_key": "Due Today",
         "milestone_field": "day_30_action",
     },
     {
-        "reminder_type": "Day 32 Overdue",
-        "title_prefix": "OVERDUE NOTICE",
-        "day_label": "Day 32",
-        "offset": 32,
-        "summary_key": "day_32",
-        "notice_key": "Overdue",
-        "milestone_field": "day_32",
-    },
-    {
         "reminder_type": "Day 35 Final Warning",
         "title_prefix": "FINAL WARNING",
         "day_label": "Day 35",
-        "offset": 35,
+        "offset": 5,
         "summary_key": "day_35",
         "notice_key": "Final Warning",
         "milestone_field": "day_35",
@@ -300,13 +262,8 @@ def _reminder_event_window(event_date: date) -> tuple[str, str]:
 def _reminder_stage_date(
     stage: ReminderStage, record: LoanRecord, issue: date | None, due: date
 ) -> date | None:
-    """Day 30 always uses the resolved due date; others use derived dates."""
-    if stage["summary_key"] == "day_30":
-        return due
-    derived = _date_value(record.get(stage["milestone_field"], ""))
-    if derived:
-        return derived
-    return issue + timedelta(days=stage["offset"]) if issue else None
+    """All milestone dates are derived from the resolved due date."""
+    return due + timedelta(days=stage["offset"])
 
 
 def _reminder_event_payload(
@@ -334,7 +291,7 @@ def _reminder_event_payload(
 def _reminder_payloads_for_record(
     record: LoanRecord,
 ) -> list[tuple[ReminderStage, dict[str, object]]]:
-    """All five stage payloads for one Active, resolvable loan record."""
+    "All three stage payloads for one Active, resolvable loan record."
     if record["status"] != "Active" or not record["ticket"]:
         return []
     issue = _date_value(record["issue_date"]) or _date_value(
@@ -375,9 +332,7 @@ def _match_managed_event(
 
 class ReminderSummary(TypedDict):
     day_23: int
-    day_27: int
     day_30: int
-    day_32: int
     day_35: int
     managed: int
     message: str
@@ -397,9 +352,7 @@ class DashboardState(rx.State):
     last_refresh: str = "Not yet refreshed"
     reminder_summary: ReminderSummary = {
         "day_23": 0,
-        "day_27": 0,
         "day_30": 0,
-        "day_32": 0,
         "day_35": 0,
         "managed": 0,
         "message": "Not reconciled",
@@ -1062,33 +1015,6 @@ def _days_to_due(due_date: date | None, today: date) -> int | None:
     return (due_date - today).days
 
 
-def _countdown_stage(due_date: date | None, today: date, status: str) -> str:
-    """Pure helper deriving a countdown stage label for reminder queues."""
-    if status == "Settled":
-        return "Settled"
-    remaining = _days_to_due(due_date, today)
-    if remaining is None:
-        return "Unscheduled"
-    if remaining > 3:
-        return "Upcoming"
-    if remaining > 0:
-        return "Pre-Due"
-    if remaining == 0:
-        return "Due Today"
-    if remaining >= -4:
-        return "Overdue"
-    return "Final Warning"
-
-
-def _stage_notice_type(stage: str) -> str:
-    """Map a countdown stage to the exact notice template key."""
-    if stage == "Due Today":
-        return "Due Today"
-    if stage == "Final Warning":
-        return "Final Warning"
-    return "Pre-Due"
-
-
 def _gaborone_date() -> date:
     try:
         from zoneinfo import ZoneInfo
@@ -1293,10 +1219,8 @@ def _read_live_records() -> dict[str, object]:
             )
             late_fees = round(days_overdue * penalty, 2)
             final_payout = round(total_due + late_fees, 2)
-            day_23 = issue_date + timedelta(days=23) if issue_date else None
-            day_27 = issue_date + timedelta(days=27) if issue_date else None
-            day_32 = issue_date + timedelta(days=32) if issue_date else None
-            day_35 = issue_date + timedelta(days=35) if issue_date else None
+            day_23 = due_date - timedelta(days=7) if due_date else None
+            day_35 = due_date + timedelta(days=5) if due_date else None
             date_settled = _iso_or_raw(
                 _first(
                     raw,
@@ -1346,20 +1270,12 @@ def _read_live_records() -> dict[str, object]:
                     "day_23_status": _milestone_status(
                         _first(raw, ["Day 23 Status"]), day_23, today, settled
                     ),
-                    "day_27": day_27.isoformat() if day_27 else "",
-                    "day_27_status": _milestone_status(
-                        _first(raw, ["Day 27 Status"]), day_27, today, settled
-                    ),
                     "day_30_action": due_date.isoformat() if due_date else "",
                     "day_30_status": _milestone_status(
                         _first(raw, ["Day 30 Status"]),
                         due_date,
                         today,
                         settled,
-                    ),
-                    "day_32": day_32.isoformat() if day_32 else "",
-                    "day_32_status": _milestone_status(
-                        _first(raw, ["Day 32 Status"]), day_32, today, settled
                     ),
                     "day_35": day_35.isoformat() if day_35 else "",
                     "day_35_status": _milestone_status(
@@ -1736,6 +1652,16 @@ def _reconcile_reminders(records: list[LoanRecord]) -> ReminderSummary:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
 
+        desired_payloads: list[
+            tuple[LoanRecord, ReminderStage, dict[str, object]]
+        ] = []
+        desired_identities: set[tuple[str, str]] = set()
+        for record in records:
+            for stage, payload in _reminder_payloads_for_record(record):
+                identity = (record["ticket"], stage["reminder_type"])
+                desired_identities.add(identity)
+                desired_payloads.append((record, stage, payload))
+
         info = json_module.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
         creds = service_account.Credentials.from_service_account_info(
             info, scopes=["https://www.googleapis.com/auth/calendar"]
@@ -1746,9 +1672,7 @@ def _reconcile_reminders(records: list[LoanRecord]) -> ReminderSummary:
         calendar_id = os.environ["GOOGLE_CALENDAR_ID"]
         summary: ReminderSummary = {
             "day_23": 0,
-            "day_27": 0,
             "day_30": 0,
-            "day_32": 0,
             "day_35": 0,
             "managed": 0,
             "message": "Calendar reminders reconciled.",
@@ -1771,29 +1695,48 @@ def _reconcile_reminders(records: list[LoanRecord]) -> ReminderSummary:
             token = response.get("nextPageToken", "")
             if not token:
                 break
-        for record in records:
-            for stage, payload in _reminder_payloads_for_record(record):
-                existing = _match_managed_event(
-                    managed_events, record["ticket"], stage["reminder_type"]
+
+        cleanup_count = 0
+        retained_events: list[dict[str, object]] = []
+        for event in managed_events:
+            properties = event.get("extendedProperties") or {}
+            private_properties = properties.get("private") or {}
+            identity = (
+                str(private_properties.get("ticket", "")),
+                str(private_properties.get("reminder_type", "")),
+            )
+            if identity not in desired_identities:
+                service.events().delete(
+                    calendarId=calendar_id,
+                    eventId=event["id"],
+                ).execute()
+                cleanup_count += 1
+            else:
+                retained_events.append(event)
+        managed_events = retained_events
+
+        for record, stage, payload in desired_payloads:
+            existing = _match_managed_event(
+                managed_events, record["ticket"], stage["reminder_type"]
+            )
+            if existing:
+                service.events().patch(
+                    calendarId=calendar_id,
+                    eventId=existing["id"],
+                    body=payload,
+                ).execute()
+            else:
+                created = (
+                    service.events()
+                    .insert(calendarId=calendar_id, body=payload)
+                    .execute()
                 )
-                if existing:
-                    service.events().patch(
-                        calendarId=calendar_id,
-                        eventId=existing["id"],
-                        body=payload,
-                    ).execute()
-                else:
-                    created = (
-                        service.events()
-                        .insert(calendarId=calendar_id, body=payload)
-                        .execute()
-                    )
-                    managed_events.append(created)
-                summary[stage["summary_key"]] += 1
-                summary["managed"] += 1
+                managed_events.append(created)
+            summary[stage["summary_key"]] += 1
+            summary["managed"] += 1
         summary["message"] = (
             f"Calendar reminders reconciled · {summary['managed']} managed events "
-            f"across Day 23/27/30/32/35."
+            f"across Day 23/30/35 · {cleanup_count} obsolete events cleaned up."
         )
         return summary
     except Exception as e:

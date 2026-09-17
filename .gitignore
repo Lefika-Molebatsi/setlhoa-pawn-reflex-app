@@ -12,5 +12,3 @@ __pycache__/
 site-packages/
 node_modules/
 assets/xy/
-.web/
-reflex.lock
