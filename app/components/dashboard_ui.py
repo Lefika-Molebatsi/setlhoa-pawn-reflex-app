@@ -83,9 +83,10 @@ def sidebar() -> rx.Component:
             "label": "Reminders Queue",
             "icon": "bell-ring",
         },
+        {"value": "inventory", "label": "Inventory", "icon": "warehouse"},
         {
             "value": "liquidation",
-            "label": "Liquidation Queue",
+            "label": "Liquidation Sales & Profit",
             "icon": "package-open",
         },
         {
@@ -310,7 +311,7 @@ def dashboard_panel() -> rx.Component:
             metric_card(
                 "Liquidation profit",
                 DashboardState.liquidation_profit,
-                "No liquidation fields in source; safe zero until that workflow is live.",
+                "Sold inventory sale prices minus principal, for the selected month lens.",
                 "package-check",
             ),
             metric_card(
@@ -716,11 +717,19 @@ def ticket_control_surface() -> rx.Component:
             DashboardState.notice_message,
             class_name=["mt-2 text-sm leading-6", TEXT_BODY],
         ),
-        rx.el.a(
-            "Open WhatsApp notice",
-            href=DashboardState.whatsapp_url,
-            target="_blank",
-            class_name=f"mt-3 inline-flex rounded-sm px-3 py-2 text-xs font-semibold {PRIMARY_BTN} {FOCUS}",
+        rx.cond(
+            DashboardState.whatsapp_url != "",
+            rx.el.a(
+                "Open WhatsApp notice",
+                href=DashboardState.whatsapp_url,
+                target="_blank",
+                rel="noopener noreferrer",
+                class_name="mt-3 inline-flex bg-[#189b2b] px-3 py-2 text-xs font-semibold text-white hover:bg-[#147f23]",
+            ),
+            rx.el.span(
+                "No valid contact",
+                class_name=["mt-3 block text-xs", TEXT_MUTED],
+            ),
         ),
         rx.el.div(
             rx.el.div(
@@ -784,14 +793,16 @@ def ticket_control_surface() -> rx.Component:
     )
 
 
-def _liquidation_row(record: LoanRecord) -> rx.Component:
+def _inventory_row(record: LoanRecord) -> rx.Component:
     return rx.el.tr(
         rx.el.td(
             record["ticket"],
             class_name=["px-3 py-3 font-['IBM_Plex_Mono']", ACCENT_TEXT],
         ),
         rx.el.td(
-            record["item"], class_name=["px-3 py-3 font-medium", TEXT_STRONG]
+            rx.el.p(record["customer"], class_name=["text-xs", TEXT_MUTED]),
+            rx.el.p(record["item"]),
+            class_name=["px-3 py-3 font-medium", TEXT_STRONG],
         ),
         rx.el.td(
             f"P{record['principal']:,.2f}",
@@ -810,7 +821,9 @@ def _liquidation_row(record: LoanRecord) -> rx.Component:
             class_name=["px-3 py-3 font-['IBM_Plex_Mono']", POSITIVE_TEXT],
         ),
         rx.el.td(record["due_date"], class_name=["px-3 py-3", TEXT_BODY]),
-        on_click=lambda: DashboardState.select_ticket(record["ticket"]),
+        on_click=lambda: DashboardState.select_inventory_ticket(
+            record["ticket"]
+        ),
         class_name=[
             "cursor-pointer border-b",
             BORDER_SOFT,
@@ -819,24 +832,36 @@ def _liquidation_row(record: LoanRecord) -> rx.Component:
     )
 
 
-def liquidation_panel() -> rx.Component:
+def inventory_panel() -> rx.Component:
     return rx.el.div(
+        inventory_feedback(),
+        rx.el.button(
+            rx.icon("refresh-cw", class_name="h-4 w-4"),
+            "Refresh Sheets",
+            on_click=DashboardState.refresh_sheets,
+            disabled=DashboardState.is_loading
+            | DashboardState.operation_loading,
+            class_name=[
+                "mb-4 flex items-center gap-2 border px-3 py-2 text-xs",
+                GHOST_BTN,
+            ],
+        ),
         rx.el.h1(
-            "LIQUIDATION QUEUE",
+            "Inventory",
             class_name=[
                 "font-['IBM_Plex_Mono'] text-xs tracking-[0.2em]",
                 ACCENT_TEXT,
             ],
         ),
         rx.el.p(
-            "Explicit Defaulted records only. Recommended price = 80% of estimated market value when available.",
+            "Unsold Defaulted items · select a ticket to Mark as Sold. Recommended price = 80% of market value when available; otherwise principal.",
             class_name=["mt-2 text-sm", TEXT_SECONDARY],
         ),
         rx.el.input(
-            placeholder="Search ticket or item",
-            default_value=DashboardState.liquidation_search,
-            on_change=DashboardState.set_liquidation_search.debounce(400),
-            aria_label="Search liquidation queue",
+            placeholder="Search ticket, customer or item",
+            default_value=DashboardState.inventory_search,
+            on_change=DashboardState.set_inventory_search.debounce(400),
+            aria_label="Search inventory",
             class_name=[
                 f"mt-5 w-full max-w-xl rounded-sm border px-3 py-2 text-sm {FOCUS}",
                 FIELD,
@@ -847,26 +872,32 @@ def liquidation_panel() -> rx.Component:
                 rx.el.thead(
                     rx.el.tr(
                         _th("Ticket"),
-                        _th("Item description"),
-                        _th("Original loan"),
+                        _th("Customer / Item"),
+                        _th("Principal"),
                         _th("Market value"),
                         _th("Recommended (80%)"),
-                        _th("Margin"),
+                        _th("Expected margin"),
                         _th("Due date"),
                         class_name=["border-b", BORDER],
                     )
                 ),
                 rx.el.tbody(
-                    rx.foreach(
-                        DashboardState.liquidation_records, _liquidation_row
-                    )
+                    rx.foreach(DashboardState.inventory_records, _inventory_row)
                 ),
                 class_name="table-auto min-w-[900px] w-full text-sm",
             ),
             class_name=["mt-5 overflow-x-auto rounded-sm border", SURFACE],
         ),
         rx.cond(
-            DashboardState.selected_ticket != "", sale_form(), rx.fragment()
+            DashboardState.selected_inventory_item, sale_form(), rx.fragment()
+        ),
+        rx.cond(
+            DashboardState.inventory_records.length() == 0,
+            rx.el.p(
+                "No unsold Defaulted items match this view.",
+                class_name=["mt-5 text-sm", TEXT_MUTED],
+            ),
+            rx.fragment(),
         ),
         class_name="w-full",
     )
@@ -875,18 +906,19 @@ def liquidation_panel() -> rx.Component:
 def sale_form() -> rx.Component:
     return rx.el.div(
         rx.el.h2(
-            "Sale confirmation",
+            f"Mark as Sold · {DashboardState.selected_record['ticket']}",
             class_name=["text-lg font-semibold", TEXT_STRONG],
         ),
         rx.el.p(
-            "Final revenue becomes realized profit after the original loan is recovered.",
+            "Net Profit = Sale Price − Principal. Confirm the final sale details before writing to Sheets.",
             class_name=["mt-2 text-sm", TEXT_SECONDARY],
         ),
         rx.el.input(
-            placeholder="Positive final cash revenue",
+            placeholder="Positive final sale price (BWP)",
             default_value=DashboardState.sale_revenue,
-            on_change=DashboardState.set_sale_revenue,
-            aria_label="Final cash revenue",
+            on_change=DashboardState.set_sale_revenue.debounce(300),
+            input_mode="decimal",
+            aria_label="Final sale price (BWP)",
             class_name=[
                 f"mt-4 block rounded-sm border px-3 py-2 text-sm {FOCUS}",
                 FIELD,
@@ -903,8 +935,12 @@ def sale_form() -> rx.Component:
             ],
         ),
         rx.el.p(
-            f"Calculated realized profit: P{DashboardState.selected_record['principal']:,.2f} principal is deducted from final revenue.",
-            class_name=["mt-3 text-sm", ACCENT_TEXT],
+            f"Net Profit: P{DashboardState.sale_profit_preview:,.2f} · Principal: P{DashboardState.selected_record['principal']:,.2f}",
+            class_name=rx.cond(
+                DashboardState.sale_profit_preview >= 0,
+                "mt-3 text-sm font-['IBM_Plex_Mono'] text-green-600",
+                "mt-3 text-sm font-['IBM_Plex_Mono'] text-red-600",
+            ),
         ),
         rx.el.label(
             rx.el.input(
@@ -913,12 +949,16 @@ def sale_form() -> rx.Component:
                 on_change=lambda _: DashboardState.toggle_sale_confirmation(),
                 class_name="h-4 w-4 accent-[#189b2b]",
             ),
-            " I confirm this sale write.",
+            " I confirm the sale price and date. Mark this inventory item Sold.",
             class_name=["mt-3 flex items-center gap-2 text-sm", TEXT_BODY],
         ),
         rx.el.button(
-            "Commit sale",
+            rx.cond(
+                DashboardState.operation_loading, "Saving…", "Mark as Sold"
+            ),
             on_click=DashboardState.submit_sale,
+            disabled=DashboardState.operation_loading
+            | ~DashboardState.sale_confirmed,
             class_name=f"mt-4 rounded-sm px-3 py-2 text-xs font-semibold {PRIMARY_BTN} {FOCUS}",
         ),
         class_name=[
@@ -928,6 +968,183 @@ def sale_form() -> rx.Component:
                 "border-[#189b2b]/50 bg-[#202629]",
             ),
         ],
+    )
+
+
+def inventory_feedback() -> rx.Component:
+    return rx.el.div(
+        rx.cond(
+            DashboardState.error_message != "",
+            rx.el.p(
+                DashboardState.error_message,
+                role="alert",
+                class_name="mb-3 text-sm text-red-600",
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
+            DashboardState.success_message != "",
+            rx.el.p(
+                DashboardState.success_message,
+                role="status",
+                class_name="mb-3 text-sm text-green-600",
+            ),
+            rx.fragment(),
+        ),
+    )
+
+
+def _sold_row(record: LoanRecord) -> rx.Component:
+    return rx.el.tr(
+        rx.el.td(record["ticket"], class_name=[CELL_MONO, ACCENT_TEXT]),
+        rx.el.td(
+            rx.el.p(record["item"]),
+            rx.el.p(record["customer"], class_name=["text-xs", TEXT_MUTED]),
+            class_name=[CELL, TEXT_BODY],
+        ),
+        rx.el.td(
+            f"P{record['principal']:,.2f}", class_name=[CELL_MONO, TEXT_BODY]
+        ),
+        rx.el.td(
+            f"P{record['final_revenue']:,.2f}",
+            class_name=[CELL_MONO, TEXT_STRONG],
+        ),
+        rx.el.td(record["sale_date"], class_name=[CELL_MONO, TEXT_BODY]),
+        rx.el.td(
+            f"P{record['realized_profit']:,.2f}",
+            class_name=rx.cond(
+                record["realized_profit"] >= 0,
+                "px-3 py-3 font-['IBM_Plex_Mono'] text-green-600",
+                "px-3 py-3 font-['IBM_Plex_Mono'] text-red-600",
+            ),
+        ),
+        class_name=["border-b", BORDER_SOFT, ROW_HOVER],
+    )
+
+
+def liquidation_panel() -> rx.Component:
+    return rx.el.div(
+        rx.el.p(
+            "REALIZED INVENTORY LEDGER",
+            class_name=[
+                "font-['IBM_Plex_Mono'] text-xs tracking-widest",
+                ACCENT_TEXT,
+            ],
+        ),
+        rx.el.h1(
+            "Liquidation Sales & Profit",
+            class_name=["mt-2 text-2xl font-semibold", TEXT_STRONG],
+        ),
+        rx.el.p(
+            "Sold items only · Net Profit = Sale Price − Principal. Summaries reflect the current search, across all months.",
+            class_name=["mt-2 text-sm", TEXT_SECONDARY],
+        ),
+        rx.el.div(
+            rx.el.div(
+                rx.el.p(
+                    "Sold items", class_name=["text-xs uppercase", TEXT_MUTED]
+                ),
+                rx.el.p(
+                    DashboardState.sold_count,
+                    class_name=[
+                        "mt-2 font-['IBM_Plex_Mono'] text-xl font-bold",
+                        TEXT_STRONG,
+                    ],
+                ),
+                class_name=["border p-4", SURFACE],
+            ),
+            calculator_metric("Total sales", DashboardState.sold_sales),
+            calculator_metric(
+                "Recovered principal", DashboardState.sold_principal
+            ),
+            rx.el.div(
+                rx.el.p(
+                    "Total net profit",
+                    class_name=["text-xs uppercase", TEXT_MUTED],
+                ),
+                rx.el.p(
+                    f"P{DashboardState.sold_profit:,.2f}",
+                    class_name=rx.cond(
+                        DashboardState.sold_profit >= 0,
+                        "mt-2 font-['IBM_Plex_Mono'] text-xl font-bold text-green-600",
+                        "mt-2 font-['IBM_Plex_Mono'] text-xl font-bold text-red-600",
+                    ),
+                ),
+                class_name=["border p-4", SURFACE],
+            ),
+            class_name="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4",
+        ),
+        rx.el.div(
+            rx.el.input(
+                placeholder="Search ticket, customer or item",
+                default_value=DashboardState.liquidation_search,
+                on_change=DashboardState.set_liquidation_search.debounce(400),
+                aria_label="Search sold inventory",
+                class_name=["min-w-0 flex-1 border px-3 py-2 text-sm", FIELD],
+            ),
+            rx.el.div(
+                rx.el.select(
+                    rx.el.option("Highest profit", value="profit"),
+                    rx.el.option("Newest sale", value="newest"),
+                    value=DashboardState.liquidation_sort,
+                    on_change=DashboardState.set_liquidation_sort,
+                    aria_label="Sort sold inventory",
+                    class_name=[
+                        "w-full appearance-none border px-3 py-2 pr-9 text-sm",
+                        FIELD,
+                    ],
+                ),
+                rx.icon(
+                    "chevron-down",
+                    class_name=[
+                        "pointer-events-none absolute right-3 top-3 h-4 w-4",
+                        TEXT_MUTED,
+                    ],
+                ),
+                class_name="relative",
+            ),
+            rx.el.button(
+                "Refresh Sheets",
+                on_click=DashboardState.refresh_sheets,
+                disabled=DashboardState.is_loading,
+                class_name=["border px-3 py-2 text-xs", GHOST_BTN],
+            ),
+            class_name="mt-5 flex flex-col gap-3 sm:flex-row",
+        ),
+        inventory_feedback(),
+        rx.el.div(
+            rx.el.table(
+                rx.el.thead(
+                    rx.el.tr(
+                        rx.foreach(
+                            [
+                                "Ticket",
+                                "Item / Customer",
+                                "Principal",
+                                "Sale Price",
+                                "Sale Date",
+                                "Net Profit",
+                            ],
+                            _th,
+                        )
+                    )
+                ),
+                rx.el.tbody(
+                    rx.foreach(DashboardState.liquidation_records, _sold_row)
+                ),
+                class_name="table-auto w-full min-w-[800px] text-sm",
+            ),
+            class_name=["mt-5 overflow-x-auto border", SURFACE],
+        ),
+        rx.cond(
+            DashboardState.sold_count == 0,
+            rx.el.p(
+                "No sold items match this view.",
+                class_name=["mt-5 text-sm", TEXT_MUTED],
+            ),
+            rx.fragment(),
+        ),
+        class_name="w-full",
     )
 
 
@@ -1412,9 +1629,13 @@ def _reminder_row(row: ReminderRow) -> rx.Component:
                 ),
                 rx.el.span(
                     rx.icon("ban", class_name="h-4 w-4"),
-                    "No valid contact",
+                    rx.cond(
+                        row["valid_contact"],
+                        "Not a notice day",
+                        "No valid contact",
+                    ),
                     aria_disabled="true",
-                    title="This loan has no valid Botswana mobile number on record.",
+                    title="Notices are available only with a valid Botswana mobile on exact Day 23, 30 or 35.",
                     class_name=[
                         "inline-flex w-fit cursor-not-allowed items-center gap-2 whitespace-nowrap rounded-sm border px-3 py-2 text-xs font-semibold",
                         INSET,

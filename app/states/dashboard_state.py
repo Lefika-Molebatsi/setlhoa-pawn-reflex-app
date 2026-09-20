@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import math
 from datetime import date, datetime, timedelta
 from typing import TypedDict
 from urllib.parse import quote
@@ -124,6 +126,7 @@ class ReminderRow(TypedDict):
     badge_color: str
     whatsapp_url: str
     whatsapp_available: bool
+    valid_contact: bool
 
 
 def _queue_stage(countdown_days: int) -> tuple[str, str, str]:
@@ -368,7 +371,8 @@ class DashboardState(rx.State):
     delete_confirmed: bool = False
     operation_loading: bool = False
     liquidation_search: str = ""
-    liquidation_sort: str = "margin"
+    liquidation_sort: str = "profit"
+    inventory_search: str = ""
     history_search: str = ""
     selected_customer_key: str = ""
     sale_revenue: str = ""
@@ -488,7 +492,7 @@ class DashboardState(rx.State):
             countdown = (due - today).days
             stage, color, label = _queue_stage(countdown)
             url = _whatsapp_link(
-                record["mobile"] or record["contact"],
+                _first_valid_mobile(record["mobile"], record["contact"]),
                 record["ticket"],
                 countdown,
             )
@@ -509,6 +513,9 @@ class DashboardState(rx.State):
                     "badge_color": color,
                     "whatsapp_url": url,
                     "whatsapp_available": bool(url),
+                    "valid_contact": bool(
+                        _first_valid_mobile(record["mobile"], record["contact"])
+                    ),
                 }
             )
         rows.sort(
@@ -525,24 +532,99 @@ class DashboardState(rx.State):
         return len(self.reminder_queue)
 
     @rx.var
-    def liquidation_records(self) -> list[LoanRecord]:
-        query = self.liquidation_search.lower().strip()
-        records = [
-            record
-            for record in self.records
-            if record["status"] == "Defaulted"
-            and (
-                not query
-                or query in f"{record['ticket']} {record['item']}".lower()
-            )
-        ]
+    def inventory_records(self) -> list[LoanRecord]:
+        query = self.inventory_search.lower().strip()
         return sorted(
-            records,
+            [
+                record
+                for record in self.records
+                if record["status"] == "Defaulted"
+                and not _is_sold(record["liquidation_status"])
+                and query
+                in f"{record['ticket']} {record['customer']} {record['item']} {record['description']}".lower()
+            ],
             key=lambda record: (
                 record["recommended_price"] - record["principal"]
             ),
-            reverse=self.liquidation_sort == "margin",
+            reverse=True,
         )
+
+    @rx.var
+    def selected_inventory_item(self) -> bool:
+        record = self.selected_record
+        return (
+            bool(record["ticket"])
+            and record["status"] == "Defaulted"
+            and not _is_sold(record["liquidation_status"])
+        )
+
+    @rx.var
+    def liquidation_records(self) -> list[LoanRecord]:
+        query = self.liquidation_search.lower().strip()
+        records: list[LoanRecord] = []
+        for record in self.records:
+            if (
+                _is_sold(record["liquidation_status"])
+                and query
+                in f"{record['ticket']} {record['customer']} {record['item']} {record['description']}".lower()
+            ):
+                sold = record.copy()
+                sold["realized_profit"] = (
+                    record["final_revenue"] - record["principal"]
+                )
+                records.append(sold)
+        if self.liquidation_sort == "newest":
+            return sorted(
+                records,
+                key=lambda r: (
+                    _date_value(r["sale_date"]) or date.min,
+                    r["ticket"],
+                ),
+                reverse=True,
+            )
+        return sorted(
+            records,
+            key=lambda r: (r["realized_profit"], r["ticket"]),
+            reverse=True,
+        )
+
+    @rx.var
+    def sold_count(self) -> int:
+        return len(self.liquidation_records)
+
+    @rx.var
+    def sold_sales(self) -> float:
+        return sum(r["final_revenue"] for r in self.liquidation_records)
+
+    @rx.var
+    def sold_principal(self) -> float:
+        return sum(r["principal"] for r in self.liquidation_records)
+
+    @rx.var
+    def sold_profit(self) -> float:
+        return sum(r["realized_profit"] for r in self.liquidation_records)
+
+    @rx.var
+    def sale_profit_preview(self) -> float:
+        revenue = _money(self.sale_revenue)
+        return (
+            revenue - self.selected_record["principal"]
+            if math.isfinite(revenue)
+            else 0.0
+        )
+
+    @rx.event
+    def set_inventory_search(self, value: str):
+        self.inventory_search = value
+
+    @rx.event
+    def select_inventory_ticket(self, ticket: str):
+        self.selected_ticket = ticket
+        self.sale_revenue = ""
+        self.sale_date = _gaborone_date().isoformat()
+        self.sale_confirmed = False
+        self.error_message = ""
+        self.success_message = ""
 
     @rx.var
     def history_records(self) -> list[LoanRecord]:
@@ -613,10 +695,12 @@ class DashboardState(rx.State):
     @rx.event
     def set_sale_revenue(self, value: str):
         self.sale_revenue = value
+        self.sale_confirmed = False
 
     @rx.event
     def set_sale_date(self, value: str):
         self.sale_date = value
+        self.sale_confirmed = False
 
     @rx.event
     def toggle_sale_confirmation(self):
@@ -624,30 +708,43 @@ class DashboardState(rx.State):
 
     @rx.event
     async def submit_sale(self):
-        if not self.selected_ticket or not self.sale_confirmed:
+        if self.operation_loading:
+            return
+        if not self.selected_inventory_item or not self.sale_confirmed:
             self.error_message = (
                 "Select a defaulted ticket and confirm the sale write."
             )
             return
+        self.operation_loading = True
+        self.error_message = ""
+        self.success_message = ""
         try:
             revenue = _money(self.sale_revenue)
-            if revenue <= 0 or not _date_value(self.sale_date):
+            if (
+                not math.isfinite(revenue)
+                or revenue <= 0
+                or not _date_value(self.sale_date)
+            ):
                 raise ValueError(
-                    "Enter a positive final revenue and valid sale date."
+                    "Enter a positive final sale price and valid sale date."
                 )
             result = await asyncio.to_thread(
                 _record_sale, self.selected_ticket, revenue, self.sale_date
             )
-            self.success_message = result
             self.sale_confirmed = False
+            self.selected_ticket = ""
+            self.sale_revenue = ""
+            self.sale_date = ""
             await self.refresh_sheets()
+            self.success_message = result
         except ValueError as e:
+            logging.exception(f"Error: {e}")
             self.error_message = str(e)
         except Exception as e:
             logging.exception(f"Error: {e}")
-            self.error_message = (
-                "Sale write failed safely; no partial confirmation was shown."
-            )
+            self.error_message = "Sale write failed; refresh Sheets to verify the item before retrying."
+        finally:
+            self.operation_loading = False
 
     @rx.var
     def selected_record(self) -> LoanRecord:
@@ -662,12 +759,11 @@ class DashboardState(rx.State):
 
     @rx.var
     def whatsapp_url(self) -> str:
-        digits = "".join(
-            ch for ch in self.selected_record["mobile"] if ch.isdigit()
+        normalized = _first_valid_mobile(
+            self.selected_record["mobile"], self.selected_record["contact"]
         )
-        normalized = (
-            digits[3:] if digits.startswith("267") else digits.lstrip("0")
-        )
+        if not normalized:
+            return ""
         return (
             f"https://wa.me/267{normalized}?text={quote(self.notice_message)}"
         )
@@ -754,6 +850,10 @@ class DashboardState(rx.State):
             self.confirmation_text = ""
             self.delete_confirmed = False
             await self.refresh_sheets()
+            self.success_message = result
+            if operation == "status" and value == "Defaulted":
+                self.inventory_search = ""
+                self.active_tab = "inventory"
         except ValueError as e:
             self.error_message = str(e)
         except Exception as e:
@@ -785,7 +885,11 @@ class DashboardState(rx.State):
 
     @rx.var
     def liquidation_profit(self) -> float:
-        return 0.0
+        return sum(
+            r["final_revenue"] - r["principal"]
+            for r in self.visible_records
+            if _is_sold(r["liquidation_status"])
+        )
 
     @rx.var
     def active_capital(self) -> float:
@@ -885,10 +989,25 @@ def _gaborone_now() -> str:
 
 
 def _normalize_mobile(value: str) -> str:
-    digits = "".join(
-        character for character in str(value) if character.isdigit()
-    )
-    return digits[3:] if digits.startswith("267") else digits.lstrip("0")
+    text = str(value or "").strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    compact = re.sub(r"[\s()\-]", "", text)
+    for prefix in ("+267", "00267", "267"):
+        if compact.startswith(prefix):
+            compact = compact[len(prefix) :]
+            break
+    if compact.startswith("0"):
+        compact = compact[1:]
+    return compact if re.fullmatch(r"7[0-9]{7}", compact) else ""
+
+
+def _first_valid_mobile(mobile: str, contact: str) -> str:
+    return _normalize_mobile(mobile) or _normalize_mobile(contact)
+
+
+def _is_sold(value: str) -> bool:
+    return value.strip().casefold() in {"sold", "liquidated / sold"}
 
 
 def _money(value: str) -> float:
@@ -1532,6 +1651,16 @@ def _mutate_live_ticket(
 
 def _record_sale(ticket: str, revenue: float, sale_date: str) -> str:
     try:
+        parsed_date = _date_value(sale_date)
+        if (
+            not ticket.strip()
+            or not math.isfinite(revenue)
+            or revenue <= 0
+            or parsed_date is None
+        ):
+            raise ValueError(
+                "Enter a valid ticket, positive final sale price and valid sale date."
+            )
         import gspread
         from google.oauth2 import service_account
 
@@ -1549,8 +1678,53 @@ def _record_sale(ticket: str, revenue: float, sale_date: str) -> str:
             .worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
         )
         values = sheet.get_all_values()
-        headers = values[0]
+        headers = [header.strip() for header in values[0]]
+        matches = []
+        for i, row in enumerate(values[1:], 2):
+            raw = {
+                header: row[j].strip() if j < len(row) else ""
+                for j, header in enumerate(headers)
+            }
+            if (
+                _first(raw, ["Pawn / Loan No.", "Submission ID"])
+                == ticket.strip()
+            ):
+                matches.append((i, raw))
+        if len(matches) != 1:
+            raise ValueError(
+                "Ticket must match exactly one live worksheet record."
+            )
+        row_index, raw = matches[0]
+        if _first(
+            raw, ["Status", "Loan Status"]
+        ).casefold() != "defaulted" or _is_sold(
+            raw.get("Liquidation Status", "")
+        ):
+            raise ValueError(
+                "Only unsold Defaulted inventory can be marked Sold."
+            )
+        principal_value = _money_value(raw.get("Approved Loan Amount", ""))
+        principal = (
+            principal_value
+            if principal_value is not None
+            else _money(
+                _first(
+                    raw,
+                    [
+                        "Principal Loan Amount",
+                        "Principal",
+                        "Principal (BWP)",
+                        "Loan Amount",
+                    ],
+                )
+            )
+        )
+        if not math.isfinite(principal) or principal < 0:
+            raise ValueError(
+                "The item has an invalid principal. Correct it before recording a sale."
+            )
         for name in [
+            "Status",
             "Liquidation Status",
             "Sale Date",
             "Final Cash Revenue",
@@ -1561,18 +1735,7 @@ def _record_sale(ticket: str, revenue: float, sale_date: str) -> str:
             if name not in headers:
                 sheet.update_cell(1, len(headers) + 1, name)
                 headers.append(name)
-        row_index = next(
-            (i for i, row in enumerate(values[1:], 2) if ticket in row), 0
-        )
-        if not row_index:
-            raise ValueError("Ticket was not found in the live worksheet.")
         row = values[row_index - 1]
-        principal = _money(
-            row[headers.index("Approved Loan Amount")]
-            if "Approved Loan Amount" in headers
-            and headers.index("Approved Loan Amount") < len(row)
-            else ""
-        )
         market = _money(
             row[headers.index("Estimated Market Value")]
             if "Estimated Market Value" in headers
@@ -1580,8 +1743,8 @@ def _record_sale(ticket: str, revenue: float, sale_date: str) -> str:
             else ""
         )
         updates = {
-            "Liquidation Status": "Liquidated / Sold",
-            "Sale Date": sale_date,
+            "Liquidation Status": "Sold",
+            "Sale Date": parsed_date.isoformat(),
             "Final Cash Revenue": f"{revenue:.2f}",
             "Realized Profit": f"{revenue - principal:.2f}",
             "Recommended Selling Price": f"{(market * 0.8 if market else principal):.2f}",
@@ -1599,7 +1762,7 @@ def _record_sale(ticket: str, revenue: float, sale_date: str) -> str:
             ]
         )
         _clear_calendar_events(ticket)
-        return "Sale committed; ticket marked Liquidated / Sold and reminders cleared."
+        return "Inventory item marked Sold; net profit recorded and reminders cleared."
     except ValueError:
         raise
     except Exception as e:
