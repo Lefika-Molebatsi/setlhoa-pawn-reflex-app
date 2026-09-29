@@ -1536,12 +1536,23 @@ def _milestone_status(
 
 
 def _unique_headers(headers: list[str]) -> list[str]:
-    counts: dict[str, int] = {}
+    """Assign collision-free lookup keys without changing physical worksheet headers."""
+    reserved = {header.strip() for header in headers if header.strip()}
+    used: set[str] = set()
     result: list[str] = []
     for header in headers:
-        key = header.strip() or "Unnamed"
-        counts[key] = counts.get(key, 0) + 1
-        result.append(f"{key} [{counts[key]}]" if counts[key] > 1 else key)
+        source = header.strip()
+        base = source or "Unnamed"
+        if base not in used and (source or base not in reserved):
+            key = base
+        else:
+            suffix = 2
+            key = f"{base}_{suffix}"
+            while key in used or key in reserved:
+                suffix += 1
+                key = f"{base}_{suffix}"
+        used.add(key)
+        result.append(key)
     return result
 
 
@@ -1600,7 +1611,7 @@ def _read_live_records() -> dict[str, object]:
             )
             if not explicit and due_date and due_date < date.today():
                 status = "Active"
-            category = raw.get("Category", raw.get("Category [2]", ""))
+            category = raw.get("Category", raw.get("Category_2", ""))
             category_other = raw.get("Category - Other", "")
             item = " ".join(
                 filter(
@@ -1986,14 +1997,11 @@ def _record_settlement(
             raise ValueError(
                 "The worksheet has no header row. Refresh Sheets and check the worksheet."
             )
-        headers = [name.strip() for name in values[0]]
+        physical_headers = values[0].copy()
+        headers = _unique_headers(physical_headers)
         if "Pawn / Loan No." not in headers and "Submission ID" not in headers:
             raise ValueError("The worksheet has no ticket identifier column.")
-        if len(headers) != len(set(headers)):
-            raise ValueError(
-                "Duplicate worksheet headers must be resolved before settling."
-            )
-        matches: list[tuple[int, dict[str, str]]] = []
+        matches: list[tuple[int, dict[str, str], list[str]]] = []
         for row_index, row in enumerate(values[1:], 2):
             raw = {
                 name: row[i].strip() if i < len(row) else ""
@@ -2003,12 +2011,12 @@ def _record_settlement(
                 _first(raw, ["Pawn / Loan No.", "Submission ID"])
                 == ticket.strip()
             ):
-                matches.append((row_index, raw))
+                matches.append((row_index, raw, row))
         if len(matches) != 1:
             raise ValueError(
                 "Ticket must match exactly one live worksheet row. Refresh Sheets and resolve missing or duplicate ticket numbers."
             )
-        row_index, raw = matches[0]
+        row_index, raw, original_row = matches[0]
         if (
             submission_id not in {"", "—"}
             and raw.get("Submission ID", "") != submission_id
@@ -2060,11 +2068,20 @@ def _record_settlement(
                 f"{existing}\n{note}" if existing else note
             )
         missing = [name for name in SETTLEMENT_COLUMNS if name not in headers]
+        before_headers = sheet.row_values(1)
+        if (
+            before_headers
+            + [""] * max(0, len(physical_headers) - len(before_headers))
+            != physical_headers
+        ):
+            raise ValueError(
+                "The worksheet headers changed while preparing settlement. Refresh Sheets before retrying."
+            )
         if missing:
-            needed = len(headers) + len(missing)
+            needed = len(physical_headers) + len(missing)
             if sheet.col_count < needed:
                 sheet.add_cols(needed - sheet.col_count)
-            first = gspread.utils.rowcol_to_a1(1, len(headers) + 1)
+            first = gspread.utils.rowcol_to_a1(1, len(physical_headers) + 1)
             last = gspread.utils.rowcol_to_a1(1, needed)
             sheet.update(
                 range_name=f"{first}:{last}",
@@ -2072,23 +2089,30 @@ def _record_settlement(
                 value_input_option="RAW",
             )
             headers.extend(missing)
-        if sheet.row_values(1)[: len(headers)] != headers:
+        verified_headers = sheet.row_values(1)
+        expected_headers = physical_headers + missing
+        if (
+            verified_headers
+            + [""] * max(0, len(expected_headers) - len(verified_headers))
+            != expected_headers
+        ):
             raise RuntimeError(
                 "Worksheet headers could not be verified; refresh Sheets before retrying."
             )
         current_row = sheet.row_values(row_index)
         if any(
-            (current_row[i].strip() if i < len(current_row) else "")
-            != raw[name]
-            for i, name in enumerate(headers[: len(values[0])])
+            (current_row[i] if i < len(current_row) else "")
+            != (original_row[i] if i < len(original_row) else "")
+            for i in range(len(physical_headers))
         ):
             raise ValueError(
                 "The live row changed while preparing settlement. Refresh Sheets and review it before retrying."
             )
+        update_columns = {name: headers.index(name) for name in updates}
         cells = [
             {
                 "range": gspread.utils.rowcol_to_a1(
-                    row_index, headers.index(name) + 1
+                    row_index, update_columns[name] + 1
                 ),
                 "values": [[value]],
             }
@@ -2097,8 +2121,8 @@ def _record_settlement(
         sheet.batch_update(cells, value_input_option="RAW")
         saved_row = sheet.row_values(row_index)
         if any(
-            headers.index(name) >= len(saved_row)
-            or saved_row[headers.index(name)].strip() != value
+            update_columns[name] >= len(saved_row)
+            or saved_row[update_columns[name]] != value
             for name, value in updates.items()
         ):
             raise RuntimeError(
