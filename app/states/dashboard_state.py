@@ -162,10 +162,10 @@ def _settlement_money(value: str | float | Decimal) -> Decimal:
         raise ValueError("Amount must be a finite, non-negative number.") from e
 
 
-def _settlement_cash(value: str) -> Decimal | None:
+def _settlement_cash(value: str) -> Decimal:
     text = str(value or "").strip()
     if not text:
-        return None
+        return Decimal("0.00")
     if not re.fullmatch(
         r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?|\.\d{1,2}", text
     ):
@@ -176,7 +176,11 @@ def _settlement_cash(value: str) -> Decimal | None:
 
 
 def _calculate_settlement(
-    principal: Decimal, interest: Decimal, late_fees: Decimal, tender: Decimal
+    principal: Decimal,
+    interest: Decimal,
+    late_fees: Decimal,
+    tender: Decimal,
+    enforce_required: bool = True,
 ) -> SettlementAmounts:
     """Pure two-decimal settlement accounting; retained cash is not refunded change."""
     principal = _settlement_money(principal)
@@ -184,7 +188,7 @@ def _calculate_settlement(
     late_fees = _settlement_money(late_fees)
     tender = _settlement_money(tender)
     required = principal + interest + late_fees
-    if tender < required:
+    if enforce_required and tender < required:
         raise ValueError(
             f"Cash tendered is short by P{required - tender:,.2f}. Required: P{required:,.2f}."
         )
@@ -208,9 +212,9 @@ def _settlement_display(
         "interest": "—",
         "late_fees": "—",
         "required": "—",
-        "tender": "—",
-        "retained": "—",
-        "profit": "—",
+        "tender": "P0.00",
+        "retained": "P0.00",
+        "profit": "P0.00",
         "error": "",
     }
     try:
@@ -234,12 +238,17 @@ def _settlement_display(
             }
         )
         tender = _settlement_cash(cash)
-        if tender is None:
-            return display
-        display["tender"] = f"P{tender:,.2f}"
-        amounts = _calculate_settlement(principal, interest, late_fees, tender)
+        amounts = _calculate_settlement(
+            principal, interest, late_fees, tender, enforce_required=False
+        )
+        display["tender"] = f"P{amounts['tender']:,.2f}"
         display["retained"] = f"P{amounts['retained']:,.2f}"
         display["profit"] = f"P{amounts['profit']:,.2f}"
+        if tender < amounts["required"]:
+            display["error"] = (
+                f"Cash tendered is short by P{amounts['required'] - tender:,.2f}. "
+                f"Enter at least P{amounts['required']:,.2f} to settle."
+            )
     except ValueError as e:
         display["error"] = str(e)
     return display
@@ -949,7 +958,6 @@ class DashboardState(rx.State):
     @rx.event
     def set_payment_amount(self, value: str):
         self.payment_amount = value
-        self.settlement_notice = ""
 
     @rx.event
     async def settle_ticket(self):
@@ -961,11 +969,9 @@ class DashboardState(rx.State):
             self.error_message = "Select an unsold Active or Extended ticket before settling. Refresh Sheets if its status changed."
             return
         try:
-            tender = _settlement_cash(self.payment_amount)
-            if tender is None:
-                raise ValueError(
-                    "Enter the cash actually retained before settling."
-                )
+            if not self.payment_amount.strip():
+                raise ValueError("Enter a cash amount before settling.")
+            _settlement_cash(self.payment_amount)
             record = self.selected_record.copy()
             preview = _settlement_display(
                 record, self.payment_amount, _gaborone_date()
@@ -983,7 +989,6 @@ class DashboardState(rx.State):
             self.success_message = result
             self.selected_ticket = ""
             self.payment_amount = ""
-            self.settlement_notice = ""
             try:
                 payload = await asyncio.to_thread(_read_live_records)
                 self.records = payload["records"]
@@ -1958,9 +1963,9 @@ def _live_settlement_amounts(
 def _record_settlement(
     ticket: str, submission_id: str, cash: str, expected: LoanRecord
 ) -> str:
+    if not cash.strip():
+        raise ValueError("Enter a cash amount before settling.")
     tender = _settlement_cash(cash)
-    if tender is None:
-        raise ValueError("Enter the cash actually retained before settling.")
     if not ticket.strip() or ticket == "Unnumbered":
         raise ValueError("Select a numbered ticket before settling.")
     try:

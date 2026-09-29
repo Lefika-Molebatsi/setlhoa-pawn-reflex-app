@@ -770,7 +770,7 @@ def settlement_tender_preview() -> rx.Component:
         rx.cond(
             DashboardState.payment_amount.strip() == "",
             rx.el.p(
-                "Enter cash tendered to calculate retained overpayment and profit.",
+                "Enter the cash retained to complete settlement. The estimate above assumes P0.00 until cash is entered.",
                 class_name=["mt-3 text-xs", TEXT_MUTED],
             ),
             rx.fragment(),
@@ -833,12 +833,12 @@ def ticket_control_surface() -> rx.Component:
                 placeholder="Cash tendered / payment amount",
                 aria_label="Cash tendered or payment amount",
                 input_mode="decimal",
-                default_value=DashboardState.payment_amount,
-                on_change=DashboardState.set_payment_amount.debounce(500),
+                on_change=DashboardState.set_payment_amount,
                 class_name=[
                     f"mt-4 rounded-sm border px-3 py-2 text-sm {FOCUS}",
                     FIELD,
                 ],
+                default_value=DashboardState.payment_amount,
             ),
             rx.cond(
                 DashboardState.settlement_eligible,
@@ -871,6 +871,7 @@ def ticket_control_surface() -> rx.Component:
                     DashboardState.settlement_preview["error"] != "",
                     rx.el.p(
                         DashboardState.settlement_preview["error"],
+                        role="alert",
                         class_name=["mt-2 text-xs font-medium", DANGER_TEXT],
                     ),
                     rx.fragment(),
