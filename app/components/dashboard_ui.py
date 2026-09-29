@@ -299,13 +299,13 @@ def dashboard_panel() -> rx.Component:
             metric_card(
                 "Monthly deployed capital",
                 DashboardState.deployed_capital,
-                "Approved loan amount for the selected live month.",
+                "Unrecovered principal on non-settled loans issued in the selected month; partial repayments deducted.",
                 "banknote",
             ),
             metric_card(
                 "Monthly realized interest",
                 DashboardState.realized_interest,
-                "Interest from records explicitly marked Settled.",
+                "Interest, late fees and retained overpayment from settled loans issued in the selected month; excludes inventory sales.",
                 "trending-up",
             ),
             metric_card(
@@ -612,6 +612,24 @@ def operations_panel() -> rx.Component:
             ),
             class_name="mt-5 max-w-xl",
         ),
+        rx.cond(
+            DashboardState.error_message != "",
+            rx.el.p(
+                DashboardState.error_message,
+                role="alert",
+                class_name="mt-4 border border-red-200 bg-red-50 p-3 text-sm text-red-700",
+            ),
+            rx.fragment(),
+        ),
+        rx.cond(
+            DashboardState.success_message != "",
+            rx.el.p(
+                DashboardState.success_message,
+                role="status",
+                class_name="mt-4 border border-green-200 bg-green-50 p-3 text-sm text-green-700",
+            ),
+            rx.fragment(),
+        ),
         rx.el.div(
             rx.el.div(
                 rx.el.table(
@@ -707,6 +725,64 @@ def ticket_detail_grid() -> rx.Component:
     )
 
 
+def _settlement_line(label: str, value: rx.Var) -> rx.Component:
+    return rx.el.div(
+        rx.el.span(label, class_name=["text-xs", TEXT_SECONDARY]),
+        rx.el.span(
+            value,
+            class_name=[
+                "font-['IBM_Plex_Mono'] text-sm font-semibold",
+                TEXT_STRONG,
+            ],
+        ),
+        class_name="flex items-center justify-between gap-3 border-b border-[#94a3b8]/20 py-2",
+    )
+
+
+def settlement_tender_preview() -> rx.Component:
+    preview = DashboardState.settlement_preview
+    return rx.el.section(
+        rx.el.div(
+            rx.icon("receipt-text", class_name="h-4 w-4 text-[#189b2b]"),
+            rx.el.h3(
+                "SETTLEMENT TENDER PREVIEW",
+                class_name=[
+                    "font-['IBM_Plex_Mono'] text-xs font-semibold tracking-wider",
+                    ACCENT_TEXT,
+                ],
+            ),
+            class_name="flex items-center gap-2",
+        ),
+        rx.el.p(
+            "Review these amounts before settling. Preview is an estimate; the live worksheet is checked again before any write.",
+            class_name=["mt-2 text-xs", TEXT_SECONDARY],
+        ),
+        rx.el.div(
+            _settlement_line("Principal outstanding", preview["principal"]),
+            _settlement_line("Interest due", preview["interest"]),
+            _settlement_line("Late fees accrued", preview["late_fees"]),
+            _settlement_line("Exact required total", preview["required"]),
+            _settlement_line("Cash tendered", preview["tender"]),
+            _settlement_line("Retained overpayment", preview["retained"]),
+            _settlement_line("Settlement realized profit", preview["profit"]),
+            class_name="mt-3 grid grid-cols-1 gap-x-6 sm:grid-cols-2",
+        ),
+        rx.cond(
+            DashboardState.payment_amount.strip() == "",
+            rx.el.p(
+                "Enter cash tendered to calculate retained overpayment and profit.",
+                class_name=["mt-3 text-xs", TEXT_MUTED],
+            ),
+            rx.fragment(),
+        ),
+        rx.el.p(
+            "Overpayment counts as profit only when the extra cash is retained. If change is refunded, enter only the cash actually kept (the required amount). Principal recovered is not profit; no interest already paid is assumed.",
+            class_name=["mt-3 text-xs leading-5", TEXT_SECONDARY],
+        ),
+        class_name=["mt-4 border p-3 sm:p-4", INSET],
+    )
+
+
 def ticket_control_surface() -> rx.Component:
     return rx.el.div(
         rx.el.h2(
@@ -754,18 +830,29 @@ def ticket_control_surface() -> rx.Component:
                 class_name="relative mt-4 w-48",
             ),
             rx.el.input(
-                placeholder="Payment amount",
+                placeholder="Cash tendered / payment amount",
+                aria_label="Cash tendered or payment amount",
+                input_mode="decimal",
                 default_value=DashboardState.payment_amount,
-                on_change=DashboardState.set_payment_amount,
+                on_change=DashboardState.set_payment_amount.debounce(500),
                 class_name=[
                     f"mt-4 rounded-sm border px-3 py-2 text-sm {FOCUS}",
                     FIELD,
                 ],
             ),
-            rx.el.button(
-                "Settle",
-                on_click=DashboardState.update_ticket_status("Settled"),
-                class_name=f"mt-4 rounded-sm px-3 py-2 text-xs font-semibold {PRIMARY_BTN} {FOCUS}",
+            rx.cond(
+                DashboardState.settlement_eligible,
+                rx.el.button(
+                    rx.cond(
+                        DashboardState.operation_loading,
+                        "Settling…",
+                        "Settle · record cash",
+                    ),
+                    on_click=DashboardState.settle_ticket,
+                    disabled=DashboardState.operation_loading,
+                    class_name=f"mt-4 rounded-sm px-3 py-2 text-xs font-semibold disabled:opacity-50 {PRIMARY_BTN} {FOCUS}",
+                ),
+                rx.fragment(),
             ),
             rx.el.button(
                 "Extend 30 days",
@@ -776,6 +863,21 @@ def ticket_control_surface() -> rx.Component:
                 ],
             ),
             class_name="flex flex-wrap items-start gap-2",
+        ),
+        rx.cond(
+            DashboardState.settlement_eligible,
+            rx.el.div(
+                rx.cond(
+                    DashboardState.settlement_preview["error"] != "",
+                    rx.el.p(
+                        DashboardState.settlement_preview["error"],
+                        class_name=["mt-2 text-xs font-medium", DANGER_TEXT],
+                    ),
+                    rx.fragment(),
+                ),
+                settlement_tender_preview(),
+            ),
+            rx.fragment(),
         ),
         rx.el.button(
             "Mark Defaulted",

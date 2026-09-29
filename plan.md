@@ -1,3 +1,4 @@
-## Setlhoa Cash Solutions Reminders Queue Plan
-- [x] Correct all incoming date parsing to day-first semantics, apply nonblank in-memory maturity and milestone fallbacks, and re-bucket dashboard records by the corrected issue month.
-- [x] Add a responsive Reminders Queue navigation tab with urgency-sorted active loans, stage-colored countdown badges, and per-row WhatsApp notices using the matching exact template.
+## Setlhoa Settlement Accounting Plan
+- [x] Add a clear settlement tender preview with exact principal, interest, accrued late fees, retained overpayment, and realized profit, preserving the existing IBM Plex/green/slate operations layout.
+- [x] Persist validated settlements and their accounting breakdown to the connected Sheet, creating missing settlement columns when needed and showing clear write errors without claiming success.
+- [x] Refresh the monthly executive metrics from persisted settlement accounting, excluding recovered principal from deployed capital and including interest, late fees, and retained overpayment in realized profit.

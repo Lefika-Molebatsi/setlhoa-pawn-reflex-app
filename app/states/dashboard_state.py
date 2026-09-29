@@ -4,8 +4,9 @@ import logging
 import os
 import re
 import math
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
-from typing import TypedDict
+from typing import Iterable, TypedDict
 from urllib.parse import quote
 
 import reflex as rx
@@ -29,6 +30,13 @@ class LoanRecord(TypedDict):
     days_overdue: int
     late_fees: float
     final_payout: float
+    cash_tendered: float
+    settlement_principal: float
+    settlement_interest: float
+    settlement_late_fees: float
+    retained_overpayment: float
+    settlement_realized_profit: float
+    settlement_required_total: float
     date_settled: str
     remarks: str
     loan_date: str
@@ -85,6 +93,13 @@ EMPTY_RECORD: LoanRecord = {
     "days_overdue": 0,
     "late_fees": 0.0,
     "final_payout": 0.0,
+    "cash_tendered": 0.0,
+    "settlement_principal": 0.0,
+    "settlement_interest": 0.0,
+    "settlement_late_fees": 0.0,
+    "retained_overpayment": 0.0,
+    "settlement_realized_profit": 0.0,
+    "settlement_required_total": 0.0,
     "date_settled": "",
     "remarks": "",
     "loan_date": "",
@@ -110,6 +125,124 @@ EMPTY_RECORD: LoanRecord = {
     "recommended_price": 0.0,
     "submission_id": "",
 }
+
+
+class SettlementAmounts(TypedDict):
+    principal: Decimal
+    interest: Decimal
+    late_fees: Decimal
+    required: Decimal
+    tender: Decimal
+    retained: Decimal
+    profit: Decimal
+
+
+class SettlementDisplay(TypedDict):
+    principal: str
+    interest: str
+    late_fees: str
+    required: str
+    tender: str
+    retained: str
+    profit: str
+    error: str
+
+
+CENT = Decimal("0.01")
+
+
+def _settlement_money(value: str | float | Decimal) -> Decimal:
+    try:
+        amount = Decimal(str(value).strip())
+        if not amount.is_finite() or amount < 0:
+            raise ValueError("Amount must be a finite, non-negative number.")
+        return amount.quantize(CENT, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError) as e:
+        logging.exception("Unexpected error")
+        raise ValueError("Amount must be a finite, non-negative number.") from e
+
+
+def _settlement_cash(value: str) -> Decimal | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if not re.fullmatch(
+        r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?|\.\d{1,2}", text
+    ):
+        raise ValueError(
+            "Enter a valid non-negative cash amount with at most two decimal places."
+        )
+    return _settlement_money(text.replace(",", ""))
+
+
+def _calculate_settlement(
+    principal: Decimal, interest: Decimal, late_fees: Decimal, tender: Decimal
+) -> SettlementAmounts:
+    """Pure two-decimal settlement accounting; retained cash is not refunded change."""
+    principal = _settlement_money(principal)
+    interest = _settlement_money(interest)
+    late_fees = _settlement_money(late_fees)
+    tender = _settlement_money(tender)
+    required = principal + interest + late_fees
+    if tender < required:
+        raise ValueError(
+            f"Cash tendered is short by P{required - tender:,.2f}. Required: P{required:,.2f}."
+        )
+    retained = max(Decimal("0.00"), tender - required)
+    return {
+        "principal": principal,
+        "interest": interest,
+        "late_fees": late_fees,
+        "required": required,
+        "tender": tender,
+        "retained": retained,
+        "profit": interest + late_fees + retained,
+    }
+
+
+def _settlement_display(
+    record: LoanRecord, cash: str, today: date
+) -> SettlementDisplay:
+    display: SettlementDisplay = {
+        "principal": "—",
+        "interest": "—",
+        "late_fees": "—",
+        "required": "—",
+        "tender": "—",
+        "retained": "—",
+        "profit": "—",
+        "error": "",
+    }
+    try:
+        principal = _settlement_money(record["remaining_principal"])
+        interest = _settlement_money(record["interest"])
+        due = _date_value(record["due_date"])
+        late_fees = (
+            _settlement_money(
+                record["daily_penalty"] * max(0, (today - due).days)
+            )
+            if due
+            else _settlement_money(record["late_fees"])
+        )
+        required = principal + interest + late_fees
+        display.update(
+            {
+                "principal": f"P{principal:,.2f}",
+                "interest": f"P{interest:,.2f}",
+                "late_fees": f"P{late_fees:,.2f}",
+                "required": f"P{required:,.2f}",
+            }
+        )
+        tender = _settlement_cash(cash)
+        if tender is None:
+            return display
+        display["tender"] = f"P{tender:,.2f}"
+        amounts = _calculate_settlement(principal, interest, late_fees, tender)
+        display["retained"] = f"P{amounts['retained']:,.2f}"
+        display["profit"] = f"P{amounts['profit']:,.2f}"
+    except ValueError as e:
+        display["error"] = str(e)
+    return display
 
 
 class ReminderRow(TypedDict):
@@ -594,15 +727,17 @@ class DashboardState(rx.State):
 
     @rx.var
     def sold_sales(self) -> float:
-        return sum(r["final_revenue"] for r in self.liquidation_records)
+        return _sum_cents(r["final_revenue"] for r in self.liquidation_records)
 
     @rx.var
     def sold_principal(self) -> float:
-        return sum(r["principal"] for r in self.liquidation_records)
+        return _sum_cents(r["principal"] for r in self.liquidation_records)
 
     @rx.var
     def sold_profit(self) -> float:
-        return sum(r["realized_profit"] for r in self.liquidation_records)
+        return _sum_cents(
+            r["realized_profit"] for r in self.liquidation_records
+        )
 
     @rx.var
     def sale_profit_preview(self) -> float:
@@ -754,6 +889,32 @@ class DashboardState(rx.State):
         return dict(EMPTY_RECORD)
 
     @rx.var
+    def settlement_eligible(self) -> bool:
+        record = self.selected_record
+        return (
+            bool(record["ticket"])
+            and record["status"] in {"Active", "Extended"}
+            and not _is_sold(record["liquidation_status"])
+        )
+
+    @rx.var
+    def settlement_preview(self) -> SettlementDisplay:
+        if not self.settlement_eligible:
+            return {
+                "principal": "—",
+                "interest": "—",
+                "late_fees": "—",
+                "required": "—",
+                "tender": "—",
+                "retained": "—",
+                "profit": "—",
+                "error": "",
+            }
+        return _settlement_display(
+            self.selected_record, self.payment_amount, _gaborone_date()
+        )
+
+    @rx.var
     def notice_message(self) -> str:
         return _notice_text(self.notice_type, self.selected_record["ticket"])
 
@@ -779,6 +940,7 @@ class DashboardState(rx.State):
     @rx.event
     def select_ticket(self, ticket: str):
         self.selected_ticket = ticket
+        self.payment_amount = ""
 
     @rx.event
     def set_notice_type(self, value: str):
@@ -787,6 +949,68 @@ class DashboardState(rx.State):
     @rx.event
     def set_payment_amount(self, value: str):
         self.payment_amount = value
+        self.settlement_notice = ""
+
+    @rx.event
+    async def settle_ticket(self):
+        if self.operation_loading:
+            return
+        self.error_message = ""
+        self.success_message = ""
+        if not self.settlement_eligible:
+            self.error_message = "Select an unsold Active or Extended ticket before settling. Refresh Sheets if its status changed."
+            return
+        try:
+            tender = _settlement_cash(self.payment_amount)
+            if tender is None:
+                raise ValueError(
+                    "Enter the cash actually retained before settling."
+                )
+            record = self.selected_record.copy()
+            preview = _settlement_display(
+                record, self.payment_amount, _gaborone_date()
+            )
+            if preview["error"]:
+                raise ValueError(preview["error"])
+            self.operation_loading = True
+            result = await asyncio.to_thread(
+                _record_settlement,
+                record["ticket"],
+                record["submission_id"],
+                self.payment_amount,
+                record,
+            )
+            self.success_message = result
+            self.selected_ticket = ""
+            self.payment_amount = ""
+            self.settlement_notice = ""
+            try:
+                payload = await asyncio.to_thread(_read_live_records)
+                self.records = payload["records"]
+                self.months = payload["months"]
+                self.worksheet_name = payload["worksheet"]
+                self.sheets_health = (
+                    f"Connected · {len(self.records)} live records"
+                )
+                self.calendar_health = payload["calendar_health"]
+                self.last_refresh = _gaborone_now()
+            except Exception:
+                logging.exception("Unexpected error")
+                logging.warning(
+                    "Settlement committed but dashboard refresh failed"
+                )
+                self.error_message = "Settlement saved and verified in Sheets, but the dashboard could not sync. Refresh Sheets to update the ledger; do not settle this ticket again."
+                self.sheets_health = "Refresh needed"
+        except ValueError as e:
+            self.error_message = str(e)
+        except Exception:
+            logging.exception("Unexpected error")
+            logging.warning(
+                "Settlement could not be confirmed; refresh before retrying"
+            )
+            self.error_message = "Settlement could not be confirmed. Refresh Sheets and check the live ticket before retrying; the write outcome may be uncertain. Check worksheet edit access if the problem persists."
+        finally:
+            self.operation_loading = False
 
     @rx.event
     def set_payment_date(self, value: str):
@@ -798,6 +1022,8 @@ class DashboardState(rx.State):
 
     @rx.event
     async def update_ticket_status(self, status: str):
+        if status == "Settled":
+            return DashboardState.settle_ticket
         await self._mutate_ticket(
             "status", status, self.payment_amount, self.payment_date
         )
@@ -873,27 +1099,33 @@ class DashboardState(rx.State):
 
     @rx.var
     def deployed_capital(self) -> float:
-        return sum(record["approved"] for record in self.visible_records)
+        return _sum_cents(
+            record["remaining_principal"]
+            for record in self.visible_records
+            if record["status"] != "Settled"
+            and not _is_sold(record["liquidation_status"])
+        )
 
     @rx.var
     def realized_interest(self) -> float:
-        return sum(
-            record["interest"]
+        return _sum_cents(
+            record["settlement_realized_profit"]
             for record in self.visible_records
             if record["status"] == "Settled"
+            and not _is_sold(record["liquidation_status"])
         )
 
     @rx.var
     def liquidation_profit(self) -> float:
-        return sum(
-            r["final_revenue"] - r["principal"]
+        return _sum_cents(
+            Decimal(str(r["final_revenue"])) - Decimal(str(r["principal"]))
             for r in self.visible_records
             if _is_sold(r["liquidation_status"])
         )
 
     @rx.var
     def active_capital(self) -> float:
-        return sum(
+        return _sum_cents(
             record["approved"]
             for record in self.visible_records
             if record["status"] in {"Active", "Extended"}
@@ -1013,6 +1245,102 @@ def _is_sold(value: str) -> bool:
 def _money(value: str) -> float:
     parsed = _money_value(value)
     return parsed if parsed is not None else 0.0
+
+
+def _sum_cents(values: Iterable[float | Decimal]) -> float:
+    total = sum(
+        (
+            Decimal(value).quantize(CENT, rounding=ROUND_HALF_UP)
+            for value in values
+        ),
+        Decimal("0"),
+    )
+    return float(total.quantize(CENT, rounding=ROUND_HALF_UP))
+
+
+def _sheet_cents(value: str) -> float:
+    parsed = _money_value(value)
+    return (
+        float(_settlement_money(parsed))
+        if parsed is not None and math.isfinite(parsed) and parsed >= 0
+        else 0.0
+    )
+
+
+def _settlement_accounting(
+    raw: dict[str, str], status: str, interest: float
+) -> dict[str, float]:
+    sold = _is_sold(raw.get("Liquidation Status", ""))
+    explicit = raw.get("Payment Type", "").strip().casefold() == "settlement"
+    settled_loan = status == "Settled" and not sold
+    detail_columns = (
+        "Settlement Principal",
+        "Settlement Interest",
+        "Settlement Late Fees",
+        "Retained Overpayment",
+        "Settlement Realized Profit",
+        "Settlement Required Total",
+    )
+    has_detail = any(str(raw.get(name, "")).strip() for name in detail_columns)
+    principal = (
+        _sheet_cents(raw.get("Settlement Principal", ""))
+        if settled_loan
+        else 0.0
+    )
+    earned_interest = (
+        _sheet_cents(raw.get("Settlement Interest", ""))
+        if settled_loan
+        else 0.0
+    )
+    fees = (
+        _sheet_cents(raw.get("Settlement Late Fees", ""))
+        if settled_loan
+        else 0.0
+    )
+    retained = (
+        _sheet_cents(raw.get("Retained Overpayment", ""))
+        if settled_loan
+        else 0.0
+    )
+    saved_profit = (
+        _sheet_cents(raw.get("Settlement Realized Profit", ""))
+        if settled_loan
+        else 0.0
+    )
+    profit = (
+        _sum_cents((earned_interest, fees, retained))
+        if settled_loan and explicit and has_detail
+        else (
+            _sheet_cents(interest) if settled_loan and not has_detail else 0.0
+        )
+    )
+    if (
+        settled_loan
+        and explicit
+        and has_detail
+        and raw.get("Settlement Realized Profit", "").strip()
+        and saved_profit != profit
+    ):
+        logging.warning(
+            "Settlement realized profit differs from persisted components; using component sum"
+        )
+    return {
+        "cash_tendered": _sheet_cents(
+            _first(raw, ["Payment Amount", "Final Payout (BWP)"])
+        )
+        if settled_loan
+        else 0.0,
+        "settlement_principal": principal,
+        "settlement_interest": earned_interest,
+        "settlement_late_fees": fees,
+        "retained_overpayment": retained,
+        "settlement_realized_profit": profit,
+        "settlement_required_total": _sheet_cents(
+            raw.get("Settlement Required Total", "")
+        )
+        if settled_loan
+        else 0.0,
+    }
 
 
 def _money_value(value: str) -> float | None:
@@ -1331,25 +1659,55 @@ def _read_live_records() -> dict[str, object]:
             penalty = penalty if penalty > 0 else 0.0
             today = _gaborone_date()
             settled = status == "Settled"
+            date_settled = _iso_or_raw(
+                _first(raw, ["Date Settled", "Settlement Date", "Payment Date"])
+            )
+            settled_on = _date_value(date_settled) if settled else None
             days_overdue = (
-                max(0, (today - due_date).days)
+                max(0, ((settled_on or due_date) - due_date).days)
+                if settled and due_date and settled_on
+                else max(0, (today - due_date).days)
                 if due_date and not settled
                 else 0
             )
-            late_fees = round(days_overdue * penalty, 2)
-            final_payout = round(total_due + late_fees, 2)
-            day_23 = due_date - timedelta(days=7) if due_date else None
-            day_35 = due_date + timedelta(days=5) if due_date else None
-            date_settled = _iso_or_raw(
-                _first(
-                    raw,
-                    [
-                        "Date Settled",
-                        "Settlement Date",
-                        "Payment Date",
-                    ],
+            accounting = _settlement_accounting(raw, status, interest_amount)
+            late_fees = (
+                accounting["settlement_late_fees"]
+                if settled
+                else _sum_cents((Decimal(days_overdue) * Decimal(penalty),))
+            )
+            recorded_payout = next(
+                (
+                    amount
+                    for name in ("Final Payout (BWP)", "Payment Amount")
+                    if (amount := _money_value(raw.get(name, ""))) is not None
+                    and math.isfinite(amount)
+                    and amount >= 0
+                ),
+                None,
+            )
+            remaining_value = _money_value(raw.get("Remaining Principal", ""))
+            remaining_principal = (
+                remaining_value
+                if remaining_value is not None
+                and math.isfinite(remaining_value)
+                and remaining_value >= 0
+                else principal
+            )
+            final_payout = (
+                float(_settlement_money(recorded_payout))
+                if settled
+                and recorded_payout is not None
+                and math.isfinite(recorded_payout)
+                and recorded_payout >= 0
+                else 0.0
+                if settled
+                else _sum_cents(
+                    (remaining_principal, interest_amount, late_fees)
                 )
             )
+            day_23 = due_date - timedelta(days=7) if due_date else None
+            day_35 = due_date + timedelta(days=5) if due_date else None
             description = " · ".join(
                 filter(
                     None,
@@ -1404,6 +1762,17 @@ def _read_live_records() -> dict[str, object]:
                     "days_overdue": days_overdue,
                     "late_fees": late_fees,
                     "final_payout": final_payout,
+                    "cash_tendered": accounting["cash_tendered"],
+                    "settlement_principal": accounting["settlement_principal"],
+                    "settlement_interest": accounting["settlement_interest"],
+                    "settlement_late_fees": accounting["settlement_late_fees"],
+                    "retained_overpayment": accounting["retained_overpayment"],
+                    "settlement_realized_profit": accounting[
+                        "settlement_realized_profit"
+                    ],
+                    "settlement_required_total": accounting[
+                        "settlement_required_total"
+                    ],
                     "date_settled": _display_text(date_settled),
                     "remarks": _display_text(
                         _first(
@@ -1448,16 +1817,7 @@ def _read_live_records() -> dict[str, object]:
                     "approved": principal,
                     "interest": interest_amount,
                     "total_due": total_due,
-                    "remaining_principal": (
-                        remaining_value
-                        if (
-                            remaining_value := _money_value(
-                                raw.get("Remaining Principal", "")
-                            )
-                        )
-                        is not None
-                        else principal
-                    ),
+                    "remaining_principal": remaining_principal,
                     "status": status,
                     "submission_id": _display_text(
                         raw.get("Submission ID", "")
@@ -1486,6 +1846,275 @@ def _read_live_records() -> dict[str, object]:
     except Exception as e:
         logging.exception(f"Error: {e}")
         raise
+
+
+SETTLEMENT_COLUMNS: tuple[str, ...] = (
+    "Status",
+    "Date Settled",
+    "Payment Amount",
+    "Payment Date",
+    "Payment Type",
+    "Remaining Principal",
+    "Final Payout (BWP)",
+    "Settlement Principal",
+    "Settlement Interest",
+    "Settlement Late Fees",
+    "Retained Overpayment",
+    "Settlement Realized Profit",
+    "Settlement Required Total",
+    "Last Updated",
+)
+
+
+def _live_settlement_amounts(
+    raw: dict[str, str], tender: Decimal, today: date
+) -> SettlementAmounts:
+    approved_text = raw.get("Approved Loan Amount", "").strip()
+    principal_text = approved_text or _first(
+        raw,
+        [
+            "Principal Loan Amount",
+            "Principal",
+            "Principal (BWP)",
+            "Loan Amount",
+        ],
+    )
+    principal_value = _money_value(principal_text) if principal_text else None
+    if (
+        principal_value is None
+        or not math.isfinite(principal_value)
+        or principal_value < 0
+    ):
+        raise ValueError(
+            "The live principal is missing or invalid. Correct the worksheet and refresh before settling."
+        )
+    principal = _settlement_money(principal_value)
+    remaining_text = raw.get("Remaining Principal", "").strip()
+    remaining_value = (
+        _money_value(remaining_text) if remaining_text else principal_value
+    )
+    if (
+        remaining_value is None
+        or not math.isfinite(remaining_value)
+        or remaining_value < 0
+    ):
+        raise ValueError(
+            "The live remaining principal is invalid. Correct the worksheet before settling."
+        )
+    interest_text = raw.get("Interest Amount", "").strip()
+    interest_value = _money_value(interest_text) if interest_text else None
+    interest = _settlement_money(
+        interest_value
+        if interest_value is not None
+        and math.isfinite(interest_value)
+        and 0 <= interest_value <= principal_value
+        else principal * Decimal("0.30")
+    )
+    issue = _authoritative_date(
+        raw,
+        "Date",
+        [
+            "Submission Date",
+            "Created At",
+            "Created at",
+            "Date Created",
+            "Timestamp",
+            "Issue Date",
+            "Loan Date",
+        ],
+    )
+    due = _resolved_due_date(raw.get("Maturity / Due Date", ""), issue)
+    if due is None:
+        raise ValueError(
+            "The live due date and issue date are missing or invalid. Correct the worksheet before settling."
+        )
+    penalty_text = _first(
+        raw,
+        [
+            "Daily Penalty",
+            "Daily Penalty (BWP)",
+            "Penalty Per Day",
+            "Daily Late Fee",
+            "Late Fee Per Day",
+        ],
+    )
+    penalty_value = _money_value(penalty_text) if penalty_text else 0.0
+    if (
+        penalty_value is None
+        or not math.isfinite(penalty_value)
+        or penalty_value < 0
+    ):
+        raise ValueError(
+            "The live daily penalty is invalid. Correct the worksheet before settling."
+        )
+    late_fees = _settlement_money(
+        Decimal(penalty_value) * max(0, (today - due).days)
+    )
+    return _calculate_settlement(
+        _settlement_money(remaining_value), interest, late_fees, tender
+    )
+
+
+def _record_settlement(
+    ticket: str, submission_id: str, cash: str, expected: LoanRecord
+) -> str:
+    tender = _settlement_cash(cash)
+    if tender is None:
+        raise ValueError("Enter the cash actually retained before settling.")
+    if not ticket.strip() or ticket == "Unnumbered":
+        raise ValueError("Select a numbered ticket before settling.")
+    try:
+        import gspread
+        from google.oauth2 import service_account
+
+        info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        sheet = (
+            gspread.authorize(creds)
+            .open_by_key(os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"])
+            .worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
+        )
+        values = sheet.get_all_values()
+        if not values:
+            raise ValueError(
+                "The worksheet has no header row. Refresh Sheets and check the worksheet."
+            )
+        headers = [name.strip() for name in values[0]]
+        if "Pawn / Loan No." not in headers and "Submission ID" not in headers:
+            raise ValueError("The worksheet has no ticket identifier column.")
+        if len(headers) != len(set(headers)):
+            raise ValueError(
+                "Duplicate worksheet headers must be resolved before settling."
+            )
+        matches: list[tuple[int, dict[str, str]]] = []
+        for row_index, row in enumerate(values[1:], 2):
+            raw = {
+                name: row[i].strip() if i < len(row) else ""
+                for i, name in enumerate(headers)
+            }
+            if (
+                _first(raw, ["Pawn / Loan No.", "Submission ID"])
+                == ticket.strip()
+            ):
+                matches.append((row_index, raw))
+        if len(matches) != 1:
+            raise ValueError(
+                "Ticket must match exactly one live worksheet row. Refresh Sheets and resolve missing or duplicate ticket numbers."
+            )
+        row_index, raw = matches[0]
+        if (
+            submission_id not in {"", "—"}
+            and raw.get("Submission ID", "") != submission_id
+        ):
+            raise ValueError(
+                "The live ticket identity changed. Refresh Sheets before settling."
+            )
+        status = _first(raw, ["Status", "Loan Status"]).title() or "Active"
+        if (
+            status not in {"Active", "Extended"}
+            or _is_sold(raw.get("Liquidation Status", ""))
+            or raw.get("Date Settled", "").strip()
+            or raw.get("Payment Type", "").strip().casefold() == "settlement"
+        ):
+            raise ValueError(
+                "This ticket is no longer an unsold Active or Extended loan. Refresh Sheets before retrying."
+            )
+        today = _gaborone_date()
+        amounts = _live_settlement_amounts(raw, tender, today)
+        preview = _settlement_display(expected, cash, today)
+        if any(
+            preview[key] != f"P{amounts[key]:,.2f}"
+            for key in ("principal", "interest", "late_fees", "required")
+        ):
+            raise ValueError(
+                "The live settlement amounts changed since the preview. Refresh Sheets, review the new totals and settle again."
+            )
+        money = lambda key: f"{amounts[key]:.2f}"
+        updates: dict[str, str] = {
+            "Status": "Settled",
+            "Date Settled": today.isoformat(),
+            "Payment Amount": money("tender"),
+            "Payment Date": today.isoformat(),
+            "Payment Type": "Settlement",
+            "Remaining Principal": "0.00",
+            "Final Payout (BWP)": money("tender"),
+            "Settlement Principal": money("principal"),
+            "Settlement Interest": money("interest"),
+            "Settlement Late Fees": money("late_fees"),
+            "Retained Overpayment": money("retained"),
+            "Settlement Realized Profit": money("profit"),
+            "Settlement Required Total": money("required"),
+            "Last Updated": _gaborone_now(),
+        }
+        if "Remarks / Notes" in headers:
+            existing = raw.get("Remarks / Notes", "")
+            note = f"Settlement {today.isoformat()}: cash P{amounts['tender']:,.2f}; required P{amounts['required']:,.2f}; retained P{amounts['retained']:,.2f}."
+            updates["Remarks / Notes"] = (
+                f"{existing}\n{note}" if existing else note
+            )
+        missing = [name for name in SETTLEMENT_COLUMNS if name not in headers]
+        if missing:
+            needed = len(headers) + len(missing)
+            if sheet.col_count < needed:
+                sheet.add_cols(needed - sheet.col_count)
+            first = gspread.utils.rowcol_to_a1(1, len(headers) + 1)
+            last = gspread.utils.rowcol_to_a1(1, needed)
+            sheet.update(
+                range_name=f"{first}:{last}",
+                values=[missing],
+                value_input_option="RAW",
+            )
+            headers.extend(missing)
+        if sheet.row_values(1)[: len(headers)] != headers:
+            raise RuntimeError(
+                "Worksheet headers could not be verified; refresh Sheets before retrying."
+            )
+        current_row = sheet.row_values(row_index)
+        if any(
+            (current_row[i].strip() if i < len(current_row) else "")
+            != raw[name]
+            for i, name in enumerate(headers[: len(values[0])])
+        ):
+            raise ValueError(
+                "The live row changed while preparing settlement. Refresh Sheets and review it before retrying."
+            )
+        cells = [
+            {
+                "range": gspread.utils.rowcol_to_a1(
+                    row_index, headers.index(name) + 1
+                ),
+                "values": [[value]],
+            }
+            for name, value in updates.items()
+        ]
+        sheet.batch_update(cells, value_input_option="RAW")
+        saved_row = sheet.row_values(row_index)
+        if any(
+            headers.index(name) >= len(saved_row)
+            or saved_row[headers.index(name)].strip() != value
+            for name, value in updates.items()
+        ):
+            raise RuntimeError(
+                "Settlement write could not be verified; refresh Sheets and inspect this ticket before retrying."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        logging.exception("Unexpected error")
+        logging.warning(
+            "Settlement Sheets access, update, or verification failed"
+        )
+        raise RuntimeError(
+            "Settlement write could not be confirmed. Refresh Sheets and inspect the live ticket before retrying; check worksheet edit access if needed."
+        ) from None
+    try:
+        _clear_calendar_events(ticket)
+    except Exception:
+        logging.exception("Unexpected error")
+        logging.warning("Settlement saved; calendar cleanup could not complete")
+    return f"Settlement saved and verified · cash P{amounts['tender']:,.2f} · realized profit P{amounts['profit']:,.2f} · retained overpayment P{amounts['retained']:,.2f}."
 
 
 def _mutate_live_ticket(
@@ -1804,9 +2433,10 @@ def _clear_calendar_events(ticket: str) -> None:
             token = response.get("nextPageToken", "")
             if not token:
                 break
-    except Exception as e:
-        logging.exception(f"Error: {e}")
-        raise RuntimeError("Calendar reminder cleanup failed safely.") from e
+    except Exception:
+        logging.exception("Unexpected error")
+        logging.warning("Calendar reminder cleanup failed")
+        raise RuntimeError("Calendar reminder cleanup failed safely.") from None
 
 
 def _reconcile_reminders(records: list[LoanRecord]) -> ReminderSummary:
