@@ -1362,7 +1362,7 @@ class DashboardState(rx.State):
             self.records = payload["records"]
             self.extension_payments = payload["extension_payments"]
             self.extension_ledger_message = payload["extension_ledger_message"]
-            self.months
+            self.months = payload["months"]
             self.worksheet_name = payload["worksheet"]
             self.sheets_health = f"Connected · {len(self.records)} live records"
             self.calendar_health = payload["calendar_health"]
