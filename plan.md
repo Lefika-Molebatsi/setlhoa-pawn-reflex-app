@@ -1,4 +1,4 @@
-## Setlhoa Settlement Accounting Plan
-- [x] Add a clear settlement tender preview with exact principal, interest, accrued late fees, retained overpayment, and realized profit, preserving the existing IBM Plex/green/slate operations layout.
-- [x] Persist validated settlements and their accounting breakdown to the connected Sheet, creating missing settlement columns when needed and showing clear write errors without claiming success.
-- [x] Refresh the monthly executive metrics from persisted settlement accounting, excluding recovered principal from deployed capital and including interest, late fees, and retained overpayment in realized profit.
+## Setlhoa Extension Repair Plan
+- [x] Parse Jotform source dates explicitly, use ISO dates for app-written extension milestones, and make Extend 30 days validate payment and update the active ticket safely.
+- [ ] Persist extension payments in a dedicated worksheet ledger and immediately reflect verified payments in monthly realized interest, Payments & Extensions, and customer history.
+- [ ] Show the saved extension details and a conditional pre-filled WhatsApp confirmation link for a valid customer mobile number.

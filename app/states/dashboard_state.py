@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from typing import Iterable, TypedDict
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import reflex as rx
 
@@ -61,6 +63,7 @@ class LoanRecord(TypedDict):
     realized_profit: float
     recommended_price: float
     submission_id: str
+    extension_pending: bool
 
 
 NOTICE_TEMPLATES: dict[str, str] = {
@@ -124,7 +127,22 @@ EMPTY_RECORD: LoanRecord = {
     "realized_profit": 0.0,
     "recommended_price": 0.0,
     "submission_id": "",
+    "extension_pending": False,
 }
+
+
+class ExtensionPayment(TypedDict):
+    extension_id: str
+    ticket: str
+    submission_id: str
+    payment_date: str
+    old_due: str
+    new_due: str
+    cash: float
+    interest: float
+    excess: float
+    principal: float
+    status: str
 
 
 class SettlementAmounts(TypedDict):
@@ -442,7 +460,7 @@ def _reminder_payloads_for_record(
     issue = _date_value(record["issue_date"]) or _date_value(
         record["loan_date"]
     )
-    due = _resolved_due_date(record["due_date"], issue)
+    due = _resolved_due_date(record["due_date"], issue, "normalized")
     if due is None:
         return []
     payloads: list[tuple[ReminderStage, dict[str, object]]] = []
@@ -485,6 +503,10 @@ class ReminderSummary(TypedDict):
 
 class DashboardState(rx.State):
     records: list[LoanRecord] = []
+    extension_payments: list[ExtensionPayment] = []
+    extension_ledger_message: str = (
+        "Refresh Sheets to load persisted extension payments."
+    )
     months: list[str] = []
     selected_month: str = "ALL"
     is_loading: bool = False
@@ -512,6 +534,7 @@ class DashboardState(rx.State):
     confirmation_text: str = ""
     delete_confirmed: bool = False
     operation_loading: bool = False
+    extension_error: str = ""
     liquidation_search: str = ""
     liquidation_sort: str = "profit"
     inventory_search: str = ""
@@ -628,7 +651,7 @@ class DashboardState(rx.State):
             issue = _date_value(record["issue_date"]) or _date_value(
                 record["loan_date"]
             )
-            due = _resolved_due_date(record["due_date"], issue)
+            due = _resolved_due_date(record["due_date"], issue, "normalized")
             if due is None:
                 continue
             countdown = (due - today).days
@@ -778,7 +801,10 @@ class DashboardState(rx.State):
         return [
             record
             for record in self.records
-            if query in record["omang"].lower()
+            if (
+                record["omang"] not in {"", "—"}
+                and query in record["omang"].lower()
+            )
             or query in _normalize_mobile(record["mobile"])
         ]
 
@@ -789,7 +815,10 @@ class DashboardState(rx.State):
         return [
             record
             for record in self.records
-            if record["omang"] == self.selected_customer_key
+            if (
+                record["omang"] not in {"", "—"}
+                and record["omang"] == self.selected_customer_key
+            )
             or (
                 not self.selected_customer_key.startswith("omang:")
                 and _normalize_mobile(record["mobile"])
@@ -834,7 +863,14 @@ class DashboardState(rx.State):
 
     @rx.event
     def select_customer(self, key: str):
-        self.selected_customer_key = key
+        for record in self.history_records:
+            if record["omang"] not in {"", "—"} and key == record["omang"]:
+                self.selected_customer_key = key
+                return
+            mobile = _normalize_mobile(record["mobile"])
+            if mobile and _normalize_mobile(key) == mobile:
+                self.selected_customer_key = mobile
+                return
 
     @rx.event
     def set_sale_revenue(self, value: str):
@@ -924,6 +960,80 @@ class DashboardState(rx.State):
         )
 
     @rx.var
+    def extension_validation(self) -> str:
+        if self.extension_error:
+            return self.extension_error
+        if self.selected_record["extension_pending"]:
+            return "Saved extension needs reconciliation before another payment. No additional cash is required."
+        if not self.settlement_eligible:
+            return "Select an unsold Active or Extended ticket to extend."
+        try:
+            _extension_cash(
+                self.payment_amount, self.selected_record["interest"]
+            )
+            if _date_value(self.selected_record["due_date"]) is None:
+                return "Due date is unresolved. Correct the worksheet to ISO and refresh before extending."
+        except ValueError as e:
+            return str(e)
+        return ""
+
+    @rx.event
+    async def extend_ticket(self):
+        if self.operation_loading or self.is_loading:
+            return
+        self.error_message = ""
+        self.success_message = ""
+        self.extension_error = ""
+        if not self.settlement_eligible:
+            self.extension_error = (
+                "Select an unsold Active or Extended ticket before extending."
+            )
+            return
+        expected = self.selected_record.copy()
+        if expected["extension_pending"]:
+            self.extension_error = "Reconcile the saved extension first; do not collect another payment."
+            return
+        try:
+            _extension_cash(self.payment_amount, expected["interest"])
+            if _date_value(expected["due_date"]) is None:
+                raise ValueError(
+                    "Due date is unresolved. Correct it to ISO in Sheets and refresh first."
+                )
+            self.operation_loading = True
+            yield
+            result = await asyncio.to_thread(
+                _record_extension, expected, self.payment_amount
+            )
+            self.success_message = result
+            self.payment_amount = ""
+            self.selected_ticket = ""
+            try:
+                payload = await asyncio.to_thread(_read_live_records)
+                self.records = payload["records"]
+                self.extension_payments = payload["extension_payments"]
+                self.extension_ledger_message = payload[
+                    "extension_ledger_message"
+                ]
+                self.months = payload["months"]
+                self.worksheet_name = payload["worksheet"]
+                self.sheets_health = (
+                    f"Connected · {len(self.records)} live records"
+                )
+                self.calendar_health = payload["calendar_health"]
+                self.last_refresh = _gaborone_now()
+            except Exception as e:
+                logging.exception(f"Error: {e}")
+                self.error_message = "Extension saved and verified, but refresh failed. Refresh Sheets; do not repeat the payment."
+                self.sheets_health = "Refresh needed"
+        except ValueError as e:
+            self.extension_error = str(e)
+        except Exception as e:
+            logging.exception(f"Error: {e}")
+            self.extension_error = "Extension could not be confirmed. Inspect the live due date and payment in Sheets before doing anything else; Retry the same snapshot to verify the existing transaction, or refresh and use Reconcile saved extension; do not collect cash again."
+        finally:
+            self.operation_loading = False
+
+    @rx.var
     def notice_message(self) -> str:
         return _notice_text(self.notice_type, self.selected_record["ticket"])
 
@@ -948,8 +1058,11 @@ class DashboardState(rx.State):
 
     @rx.event
     def select_ticket(self, ticket: str):
+        if self.operation_loading:
+            return
         self.selected_ticket = ticket
         self.payment_amount = ""
+        self.extension_error = ""
 
     @rx.event
     def set_notice_type(self, value: str):
@@ -957,7 +1070,9 @@ class DashboardState(rx.State):
 
     @rx.event
     def set_payment_amount(self, value: str):
-        self.payment_amount = value
+        if not self.operation_loading:
+            self.payment_amount = value
+            self.extension_error = ""
 
     @rx.event
     async def settle_ticket(self):
@@ -969,6 +1084,10 @@ class DashboardState(rx.State):
             self.error_message = "Select an unsold Active or Extended ticket before settling. Refresh Sheets if its status changed."
             return
         try:
+            if self.selected_record["extension_pending"]:
+                raise ValueError(
+                    "Reconcile the saved extension payment before settling this ticket."
+                )
             if not self.payment_amount.strip():
                 raise ValueError("Enter a cash amount before settling.")
             _settlement_cash(self.payment_amount)
@@ -1029,6 +1148,8 @@ class DashboardState(rx.State):
     async def update_ticket_status(self, status: str):
         if status == "Settled":
             return DashboardState.settle_ticket
+        if status == "Extended":
+            return DashboardState.extend_ticket
         await self._mutate_ticket(
             "status", status, self.payment_amount, self.payment_date
         )
@@ -1041,9 +1162,7 @@ class DashboardState(rx.State):
 
     @rx.event
     async def interest_extension(self):
-        await self._mutate_ticket(
-            "interest_extension", self.payment_amount, self.payment_date, ""
-        )
+        return DashboardState.extend_ticket
 
     @rx.event
     async def delete_ticket(self):
@@ -1059,6 +1178,8 @@ class DashboardState(rx.State):
     async def _mutate_ticket(
         self, operation: str, value: str, second: str, third: str
     ):
+        if self.operation_loading:
+            return
         if not self.selected_ticket:
             self.error_message = (
                 "Select a ticket before performing an operation."
@@ -1113,12 +1234,66 @@ class DashboardState(rx.State):
 
     @rx.var
     def realized_interest(self) -> float:
-        return _sum_cents(
-            record["settlement_realized_profit"]
-            for record in self.visible_records
-            if record["status"] == "Settled"
-            and not _is_sold(record["liquidation_status"])
+        month = (
+            self.selected_month
+            if self.selected_month != "ALL"
+            else _gaborone_date().strftime("%Y-%m")
         )
+        return _monthly_realized_interest(
+            self.records, self.extension_payments, month
+        )
+
+    @rx.var
+    def visible_extension_payments(self) -> list[ExtensionPayment]:
+        query = self.ledger_search.strip().casefold()
+        return [
+            p
+            for p in self.extension_payments
+            if (
+                self.selected_month == "ALL"
+                or p["payment_date"][:7] == self.selected_month
+            )
+            and (not query or query in p["ticket"].casefold())
+        ]
+
+    @rx.var
+    def customer_extension_payments(self) -> list[ExtensionPayment]:
+        identities = {
+            (r["ticket"], r["submission_id"])
+            for r in self.selected_customer_records
+        }
+        return [
+            p
+            for p in self.extension_payments
+            if (p["ticket"], p["submission_id"]) in identities
+        ]
+
+    @rx.event
+    async def reconcile_extension(self):
+        if (
+            self.operation_loading
+            or not self.selected_record["extension_pending"]
+        ):
+            return
+        self.operation_loading = True
+        self.extension_error = ""
+        self.success_message = ""
+        try:
+            result = await asyncio.to_thread(
+                _record_extension, self.selected_record.copy(), "", True
+            )
+            payload = await asyncio.to_thread(_read_live_records)
+            self.records = payload["records"]
+            self.extension_payments = payload["extension_payments"]
+            self.extension_ledger_message = payload["extension_ledger_message"]
+            self.months = payload["months"]
+            self.last_refresh = _gaborone_now()
+            self.success_message = result
+        except Exception as e:
+            logging.exception(f"Error: {e}")
+            self.extension_error = "Reconciliation could not be verified. Keep the saved transaction intact and retry reconciliation; do not collect another payment."
+        finally:
+            self.operation_loading = False
 
     @rx.var
     def liquidation_profit(self) -> float:
@@ -1176,13 +1351,18 @@ class DashboardState(rx.State):
 
     @rx.event
     async def refresh_sheets(self):
+        if self.operation_loading:
+            return
         self.is_loading = True
         self.error_message = ""
         self.success_message = ""
+        self.extension_error = ""
         try:
             payload = await asyncio.to_thread(_read_live_records)
             self.records = payload["records"]
-            self.months = payload["months"]
+            self.extension_payments = payload["extension_payments"]
+            self.extension_ledger_message = payload["extension_ledger_message"]
+            self.months
             self.worksheet_name = payload["worksheet"]
             self.sheets_health = f"Connected · {len(self.records)} live records"
             self.calendar_health = payload["calendar_health"]
@@ -1214,15 +1394,9 @@ class DashboardState(rx.State):
 
 
 def _gaborone_now() -> str:
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(ZoneInfo("Africa/Gaborone")).strftime(
-            "%d %b %Y · %H:%M"
-        )
-    except Exception as e:
-        logging.exception(f"Error: {e}")
-        return datetime.now().strftime("%d %b %Y · %H:%M")
+    return datetime.now(ZoneInfo("Africa/Gaborone")).isoformat(
+        timespec="seconds"
+    )
 
 
 def _normalize_mobile(value: str) -> str:
@@ -1363,83 +1537,57 @@ def _money_value(value: str) -> float | None:
         return None
 
 
-DAY_FIRST_FORMATS: tuple[str, ...] = (
-    "%Y-%m-%d",
-    "%Y/%m/%d",
-    "%d/%m/%Y",
-    "%d-%m-%Y",
-    "%d.%m.%Y",
-    "%d %m %Y",
-    "%d/%m/%y",
-    "%d-%m-%y",
-    "%d %b %Y",
-    "%d %B %Y",
-    "%b %d, %Y",
-    "%B %d, %Y",
-)
-
-
 def _parse_business_date(value: str) -> date | None:
-    """Parse any incoming business date using strict day-first semantics.
-
-    Ambiguous numeric dates such as 03/09/2026 resolve to 3 September 2026.
-    Unambiguous ISO dates (YYYY-MM-DD) and common timestamp suffixes
-    ("03/09/2026 10:45:00", "2026-09-03T10:45:00Z") are accepted safely.
-    """
+    """ISO first; never guess the order of an ambiguous legacy numeric date."""
     text = str(value or "").strip()
-    if not text:
-        return None
-    candidate = text.replace("T", " ").split(" ")[0].strip()
-    if candidate.count(":"):
-        candidate = candidate.split(":")[0]
-    for source in (candidate, text):
-        for fmt in DAY_FIRST_FORMATS:
-            try:
-                return datetime.strptime(source, fmt).date()
-            except ValueError:
-                continue
-    parts = [
-        piece
-        for piece in candidate.replace("-", "/").replace(".", "/").split("/")
-        if piece
-    ]
-    if len(parts) == 3 and all(piece.isdigit() for piece in parts):
+    candidate = text.replace("T", " ").split(" ", 1)[0]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
         try:
-            if len(parts[0]) == 4:
-                return date(int(parts[0]), int(parts[1]), int(parts[2]))
-            year = int(parts[2])
-            year = year + 2000 if year < 100 else year
-            return date(year, int(parts[1]), int(parts[0]))
+            return date.fromisoformat(candidate)
         except ValueError:
             return None
+    match = re.fullmatch(r"(\d{2})[/-](\d{2})[/-](\d{4})", candidate)
+    if match:
+        first, second, year = map(int, match.groups())
+        try:
+            if first == second:
+                return date(year, first, second)
+            if first > 12:
+                return date(year, second, first)
+            if second > 12:
+                return date(year, first, second)
+        except ValueError:
+            return None
+        return None
+    for fmt in ("%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
     return None
 
 
 def _parse_jotform_source_date(value: str) -> date | None:
-    """Parse Jotform source dates with strict MM-DD-YYYY semantics."""
-    text = str(value or "").strip()
-    if not text:
+    """Known source uses MM-DD-YYYY / MM/DD/YYYY; ISO is always year-first."""
+    candidate = str(value or "").strip().replace("T", " ").split(" ", 1)[0]
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+        return _parse_business_date(candidate)
+    match = re.fullmatch(r"(\d{2})[/-](\d{2})[/-](\d{4})", candidate)
+    if not match:
         return None
-    candidate = text.replace("T", " ").split(" ", 1)[0].strip()
-    if len(candidate) == 10 and candidate[2] == "-" and candidate[5] == "-":
-        try:
-            month, day, year = (int(part) for part in candidate.split("-"))
-            return date(year, month, day)
-        except (TypeError, ValueError) as e:
-            logging.exception(f"Error: {e}")
-            return None
-    if len(candidate) == 10 and candidate[4] == "-" and candidate[7] == "-":
-        try:
-            return date.fromisoformat(candidate)
-        except ValueError as e:
-            logging.exception(f"Error: {e}")
-            return None
-    return None
+    month, day, year = map(int, match.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
-def _date_value(value: str) -> date | None:
-    """Centralized day-first date parsing used across this module."""
-    return _parse_business_date(value)
+def _date_value(value: str, source: str = "normalized") -> date | None:
+    return (
+        _parse_jotform_source_date(value)
+        if source == "jotform"
+        else _parse_business_date(value)
+    )
 
 
 def _iso_or_raw(value: str) -> str:
@@ -1451,14 +1599,28 @@ def _iso_or_raw(value: str) -> str:
     return parsed.isoformat() if parsed else raw
 
 
-def _resolved_due_date(explicit: str, issue_date: date | None) -> date | None:
-    """Use a valid Jotform due date, else issue date plus 30 days."""
-    parsed = _parse_jotform_source_date(explicit) or _parse_business_date(
-        explicit
-    )
-    if parsed:
-        return parsed
+def _resolved_due_date(
+    explicit: str, issue_date: date | None, source: str = "jotform"
+) -> date | None:
+    """Source dates are month-first; normalized records never guess legacy order."""
+    if str(explicit or "").strip():
+        return _date_value(explicit, source)
     return issue_date + timedelta(days=30) if issue_date else None
+
+
+def _record_due_date(raw: dict[str, str], issue: date | None) -> date | None:
+    explicit = raw.get("Maturity / Due Date", "").strip()
+    if not explicit:
+        return _resolved_due_date("", issue)
+    legacy_extension = "extension" in raw.get(
+        "Payment Type", ""
+    ).casefold() or (
+        _first(raw, ["Status", "Loan Status"]).casefold() == "extended"
+        and bool(raw.get("Last Updated", "").strip())
+    )
+    return _date_value(
+        explicit, "normalized" if legacy_extension else "jotform"
+    )
 
 
 def _days_to_due(due_date: date | None, today: date) -> int | None:
@@ -1468,13 +1630,7 @@ def _days_to_due(due_date: date | None, today: date) -> int | None:
 
 
 def _gaborone_date() -> date:
-    try:
-        from zoneinfo import ZoneInfo
-
-        return datetime.now(ZoneInfo("Africa/Gaborone")).date()
-    except Exception as e:
-        logging.exception(f"Error: {e}")
-        return date.today()
+    return datetime.now(ZoneInfo("Africa/Gaborone")).date()
 
 
 def _first(raw: dict[str, str], names: list[str]) -> str:
@@ -1571,9 +1727,14 @@ def _read_live_records() -> dict[str, object]:
             info, scopes=scopes
         )
         client = gspread.authorize(creds)
-        sheet = client.open_by_key(
+        spreadsheet = client.open_by_key(
             os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"]
-        ).worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
+        )
+        sheet = spreadsheet.worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
+        extension_payments, ledger_message = _load_extension_payments(
+            spreadsheet
+        )
+        verified_ids = {p["extension_id"] for p in extension_payments}
         values = sheet.get_all_values()
         headers = _unique_headers(values[0])
         rows = values[1:]
@@ -1599,17 +1760,14 @@ def _read_live_records() -> dict[str, object]:
                 ],
             )
             loan_date = issue_date
-            due_date = _resolved_due_date(
-                raw.get("Maturity / Due Date", ""),
-                issue_date,
-            )
+            due_date = _record_due_date(raw, issue_date)
             explicit = _first(raw, ["Status", "Loan Status"]).title()
             status = (
                 explicit
                 if explicit in {"Active", "Settled", "Extended", "Defaulted"}
                 else "Active"
             )
-            if not explicit and due_date and due_date < date.today():
+            if not explicit and due_date and due_date < _gaborone_date():
                 status = "Active"
             category = raw.get("Category", raw.get("Category_2", ""))
             category_other = raw.get("Category - Other", "")
@@ -1802,7 +1960,9 @@ def _read_live_records() -> dict[str, object]:
                         )
                     ),
                     "loan_date": loan_date.isoformat() if loan_date else "",
-                    "due_date": due_date.isoformat() if due_date else "",
+                    "due_date": due_date.isoformat()
+                    if due_date
+                    else raw.get("Maturity / Due Date", "").strip(),
                     "customer": _display_text(
                         " ".join(
                             filter(
@@ -1838,6 +1998,8 @@ def _read_live_records() -> dict[str, object]:
                     "submission_id": _display_text(
                         raw.get("Submission ID", "")
                     ),
+                    "extension_pending": bool(raw.get("Extension ID", ""))
+                    and raw.get("Extension ID", "") not in verified_ids,
                 }
             )
         calendar = build(
@@ -1848,11 +2010,20 @@ def _read_live_records() -> dict[str, object]:
         ).execute()
         return {
             "records": records,
+            "extension_payments": extension_payments,
+            "extension_ledger_message": ledger_message,
             "months": sorted(
                 {
                     record["month"]
                     for record in records
                     if record["month"] != "Unknown"
+                }
+                | {p["payment_date"][:7] for p in extension_payments}
+                | {
+                    r["date_settled"][:7]
+                    for r in records
+                    if r["status"] == "Settled"
+                    and _date_value(r["date_settled"])
                 },
                 reverse=True,
             ),
@@ -1862,6 +2033,591 @@ def _read_live_records() -> dict[str, object]:
     except Exception as e:
         logging.exception(f"Error: {e}")
         raise
+
+
+def _validated_payment_date(value: str) -> str:
+    if not value.strip():
+        return _gaborone_date().isoformat()
+    parsed = _date_value(value)
+    if parsed is None or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value.strip()):
+        raise ValueError("Enter the payment date as YYYY-MM-DD.")
+    return parsed.isoformat()
+
+
+def _extension_cash(cash: str, interest: float | Decimal) -> Decimal:
+    if not cash.strip():
+        raise ValueError(
+            "Enter cash received for the extension (up to two decimal places)."
+        )
+    tender = _settlement_cash(cash)
+    if tender <= 0:
+        raise ValueError("Extension cash must be finite and positive.")
+    required = _settlement_money(interest)
+    if tender < required:
+        raise ValueError(
+            f"Extension must cover current interest: P{required:,.2f}; short by P{required - tender:,.2f}."
+        )
+    return tender
+
+
+def _extension_fingerprint(record: LoanRecord) -> str:
+    return _extension_id(
+        record["ticket"], record["submission_id"], record["due_date"]
+    )
+
+
+def _extension_updates(
+    raw: dict[str, str], expected: LoanRecord, cash: str, today: date
+) -> dict[str, str]:
+    status = _first(raw, ["Status", "Loan Status"]).title() or "Active"
+    if status not in {"Active", "Extended"} or _is_sold(
+        raw.get("Liquidation Status", "")
+    ):
+        raise ValueError(
+            "Only an unsold Active or Extended ticket can be extended."
+        )
+    if (
+        raw.get("Date Settled", "").strip()
+        or raw.get("Payment Type", "").casefold() == "settlement"
+    ):
+        raise ValueError(
+            "This ticket already has settlement details; refresh and resolve its status first."
+        )
+    ticket = _first(raw, ["Pawn / Loan No.", "Submission ID"])
+    if (
+        ticket != expected["ticket"]
+        or _display_text(raw.get("Submission ID", ""))
+        != expected["submission_id"]
+    ):
+        raise ValueError(
+            "Live ticket identity changed. Refresh Sheets before extending."
+        )
+    issue = _authoritative_date(
+        raw,
+        "Date",
+        [
+            "Issue Date",
+            "Loan Date",
+            "Submission Date",
+            "Created At",
+            "Created at",
+            "Date Created",
+            "Timestamp",
+        ],
+    )
+    due = _record_due_date(raw, issue)
+    if due is None:
+        raise ValueError(
+            "Live due date is invalid or ambiguous. Correct it to ISO and refresh before extending."
+        )
+    principal_text = _first(
+        raw,
+        [
+            "Approved Loan Amount",
+            "Principal Loan Amount",
+            "Principal",
+            "Principal (BWP)",
+            "Loan Amount",
+        ],
+    )
+    principal = _extension_sheet_money(principal_text)
+    remaining = _extension_sheet_money(
+        raw.get("Remaining Principal", "").strip() or principal_text
+    )
+    interest = _extension_sheet_money(raw.get("Interest Amount", ""))
+    if (
+        principal <= 0
+        or remaining <= 0
+        or remaining > principal
+        or interest > principal
+    ):
+        raise ValueError(
+            "Live principal or interest is inconsistent. Correct Sheets before extending."
+        )
+    if (
+        status != expected["status"]
+        or due != _date_value(expected["due_date"])
+        or principal != _settlement_money(expected["principal"])
+        or remaining != _settlement_money(expected["remaining_principal"])
+        or interest != _settlement_money(expected["interest"])
+        or _iso_or_raw(raw.get("Payment Date", "")) != expected["payment_date"]
+    ):
+        raise ValueError(
+            "The live status, due date or amounts changed. Refresh and review before extending."
+        )
+    tender = _extension_cash(cash, interest)
+    new_due = max(today, due) + timedelta(days=30)
+    next_interest = _settlement_money(remaining * interest / principal)
+    return {
+        "Status": "Extended",
+        "Maturity / Due Date": new_due.isoformat(),
+        "Day 23 Courtesy": (new_due - timedelta(days=7)).isoformat(),
+        "Day 30 Due Action": new_due.isoformat(),
+        "Day 35 Final Warning": (new_due + timedelta(days=5)).isoformat(),
+        "Payment Amount": f"{tender:.2f}",
+        "Payment Date": today.isoformat(),
+        "Payment Type": "Interest Extension",
+        "Remaining Principal": f"{remaining:.2f}",
+        "Interest Amount": f"{next_interest:.2f}",
+        "Total Amount Due": f"{remaining + next_interest:.2f}",
+        "Last Updated": _gaborone_now(),
+    }
+
+
+def _write_ticket_extension(
+    sheet,
+    expected: LoanRecord,
+    cash: str,
+    today: date,
+    spreadsheet=None,
+    repair: bool = False,
+) -> str:
+    """Optimistic live check, append-only headers, one RAW batch, then read-back."""
+    import gspread
+
+    if not expected["ticket"].strip() or expected["ticket"] == "Unnumbered":
+        raise ValueError("Select a numbered ticket before extending.")
+    values = sheet.get_all_values()
+    if not values:
+        raise ValueError("Worksheet has no headers.")
+    physical = values[0].copy()
+    headers = _unique_headers(physical)
+    matches: list[tuple[int, dict[str, str], list[str]]] = []
+    for index, row in enumerate(values[1:], 2):
+        raw = {
+            name: row[i].strip() if i < len(row) else ""
+            for i, name in enumerate(headers)
+        }
+        if (
+            _first(raw, ["Pawn / Loan No.", "Submission ID"])
+            == expected["ticket"]
+        ):
+            matches.append((index, raw, row))
+    if len(matches) != 1:
+        raise ValueError(
+            "Ticket must match exactly one live row. Resolve duplicate or missing identifiers and refresh."
+        )
+    index, raw, original = matches[0]
+    if spreadsheet is None:
+        spreadsheet = sheet.spreadsheet
+    saved_id = raw.get("Extension ID", "")
+    requested_id = _extension_fingerprint(expected)
+    if saved_id:
+        journal = _extension_journal(raw)
+        if saved_id == requested_id or repair:
+            if not repair and _settlement_cash(cash) != Decimal(
+                journal["Cash Received"]
+            ):
+                raise ValueError(
+                    "Retry cash differs from the saved transaction. Reconcile the saved extension without collecting cash again."
+                )
+            _verify_extension_primary(raw, journal)
+            _append_extension_payment(spreadsheet, journal)
+            final_row = sheet.row_values(index)
+            final_raw = {
+                name: final_row[i].strip() if i < len(final_row) else ""
+                for i, name in enumerate(headers)
+            }
+            _verify_extension_primary(final_raw, journal)
+            if final_raw.get("Extension ID") != saved_id:
+                raise RuntimeError(
+                    "Primary extension changed during reconciliation. Refresh and inspect the saved transaction."
+                )
+            return _extension_result(journal)
+        existing, _ = _load_extension_payments(spreadsheet)
+        if not any(p["extension_id"] == saved_id for p in existing):
+            raise ValueError(
+                "Previous extension payment needs reconciliation. Select Reconcile saved extension before another payment."
+            )
+    if repair:
+        raise ValueError(
+            "No durable extension transaction is available to reconcile."
+        )
+    updates = _extension_updates(raw, expected, cash, today)
+    journal = {
+        "Extension ID": requested_id,
+        "Ticket": expected["ticket"],
+        "Submission ID": expected["submission_id"],
+        "Payment Date": updates["Payment Date"],
+        "Old Due": expected["due_date"],
+        "New Due": updates["Maturity / Due Date"],
+        "Cash Received": updates["Payment Amount"],
+        "Interest Realized": f"{_extension_sheet_money(raw['Interest Amount']):.2f}",
+        "Unapplied Excess": f"{Decimal(updates['Payment Amount']) - _extension_sheet_money(raw['Interest Amount']):.2f}",
+        "Remaining Principal": updates["Remaining Principal"],
+        "Status": "Verified",
+        "Verification": "Primary read-back verified",
+        "Primary Updates": json.dumps(updates, sort_keys=True),
+    }
+    updates = {
+        **updates,
+        "Extension ID": requested_id,
+        "Extension Transaction": json.dumps(journal, sort_keys=True),
+    }
+    missing = [name for name in updates if name not in headers]
+    if sheet.row_values(1) != physical:
+        raise ValueError("Headers changed; refresh before extending.")
+    if missing:
+        needed = len(physical) + len(missing)
+        if sheet.col_count < needed:
+            sheet.add_cols(needed - sheet.col_count)
+        first = gspread.utils.rowcol_to_a1(1, len(physical) + 1)
+        last = gspread.utils.rowcol_to_a1(1, needed)
+        sheet.update(
+            range_name=f"{first}:{last}",
+            values=[missing],
+            value_input_option="RAW",
+        )
+        headers.extend(missing)
+    if sheet.row_values(1) != physical + missing:
+        raise RuntimeError(
+            "Extension headers could not be verified. Inspect Sheets before retrying."
+        )
+    current = sheet.row_values(index)
+    if any(
+        (current[i] if i < len(current) else "")
+        != (original[i] if i < len(original) else "")
+        for i in range(len(physical))
+    ):
+        raise ValueError(
+            "Live row changed during preparation; refresh and inspect before retrying."
+        )
+    columns = {name: headers.index(name) for name in updates}
+    sheet.batch_update(
+        [
+            {
+                "range": gspread.utils.rowcol_to_a1(index, columns[name] + 1),
+                "values": [[value]],
+            }
+            for name, value in updates.items()
+        ],
+        value_input_option="RAW",
+    )
+    saved = sheet.row_values(index)
+    if any(
+        columns[name] >= len(saved) or saved[columns[name]] != value
+        for name, value in updates.items()
+    ):
+        raise RuntimeError(
+            "Extension write was not verified. Inspect live payment and due date; do not replay this attempt."
+        )
+    _append_extension_payment(spreadsheet, journal)
+    final_row = sheet.row_values(index)
+    final_raw = {
+        name: final_row[i].strip() if i < len(final_row) else ""
+        for i, name in enumerate(headers)
+    }
+    _verify_extension_primary(final_raw, journal)
+    if final_raw.get("Extension ID") != requested_id:
+        raise RuntimeError(
+            "Payment persisted but primary transaction changed. Refresh and reconcile before proceeding."
+        )
+    return _extension_result(journal)
+
+
+def _record_extension(
+    expected: LoanRecord, cash: str, repair: bool = False
+) -> str:
+    try:
+        import gspread
+        from google.oauth2 import service_account
+
+        creds = service_account.Credentials.from_service_account_info(
+            json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
+            scopes=["https://www.googleapis.com/auth/spreadsheets"],
+        )
+        spreadsheet = gspread.authorize(creds).open_by_key(
+            os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"]
+        )
+        sheet = spreadsheet.worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
+        return _write_ticket_extension(
+            sheet, expected, cash, _gaborone_date(), spreadsheet, repair
+        )
+    except ValueError:
+        raise
+    except Exception as e:
+        logging.exception(f"Error: {e}")
+        raise RuntimeError(
+            "Extension outcome is uncertain. Inspect Sheets before retrying."
+        ) from None
+
+
+EXTENSION_COLUMNS: tuple[str, ...] = (
+    "Extension ID",
+    "Ticket",
+    "Submission ID",
+    "Payment Date",
+    "Old Due",
+    "New Due",
+    "Cash Received",
+    "Interest Realized",
+    "Unapplied Excess",
+    "Remaining Principal",
+    "Status",
+    "Verification",
+    "Primary Updates",
+)
+
+
+def _extension_id(ticket: str, submission: str, old_due: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", old_due) or not _date_value(
+        old_due
+    ):
+        raise ValueError("Extension requires a strict ISO previous due date.")
+    identity = json.dumps([ticket, submission, old_due], separators=(",", ":"))
+    return f"EXT-{hashlib.sha256(identity.encode()).hexdigest()}"
+
+
+def _extension_sheet_money(value: str) -> Decimal:
+    text = str(value).strip().replace("BWP", "").removeprefix("P").strip()
+    if not text:
+        raise ValueError(
+            "A required extension amount is missing. Correct Sheets and refresh."
+        )
+    return _settlement_cash(text)
+
+
+def _extension_result(journal: dict[str, str]) -> str:
+    return f"Extension saved and verified in ticket and payment ledger · cash P{Decimal(journal['Cash Received']):,.2f} · interest P{Decimal(journal['Interest Realized']):,.2f} · due {journal['New Due']}."
+
+
+def _validated_extension_entry(raw: dict[str, str]) -> ExtensionPayment:
+    for key in ("Payment Date", "Old Due", "New Due"):
+        if not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}", raw.get(key, "")
+        ) or not _date_value(raw[key]):
+            raise ValueError("Extension ledger has an invalid ISO date.")
+    if raw.get("Extension ID") != _extension_id(
+        raw["Ticket"], raw["Submission ID"], raw["Old Due"]
+    ):
+        raise ValueError(
+            "Extension ledger identity does not match its due transition."
+        )
+    amounts = {
+        key: _extension_sheet_money(raw.get(key, ""))
+        for key in (
+            "Cash Received",
+            "Interest Realized",
+            "Unapplied Excess",
+            "Remaining Principal",
+        )
+    }
+    if (
+        amounts["Cash Received"] <= 0
+        or amounts["Cash Received"]
+        != amounts["Interest Realized"] + amounts["Unapplied Excess"]
+    ):
+        raise ValueError("Extension ledger cash allocation is inconsistent.")
+    if date.fromisoformat(raw["New Due"]) != max(
+        date.fromisoformat(raw["Old Due"]),
+        date.fromisoformat(raw["Payment Date"]),
+    ) + timedelta(days=30):
+        raise ValueError("Extension ledger due transition is inconsistent.")
+    return ExtensionPayment(
+        extension_id=raw["Extension ID"],
+        ticket=raw["Ticket"],
+        submission_id=raw["Submission ID"],
+        payment_date=raw["Payment Date"],
+        old_due=raw["Old Due"],
+        new_due=raw["New Due"],
+        cash=float(amounts["Cash Received"]),
+        interest=float(amounts["Interest Realized"]),
+        excess=float(amounts["Unapplied Excess"]),
+        principal=float(amounts["Remaining Principal"]),
+        status=raw["Status"],
+    )
+
+
+def _extension_journal(raw: dict[str, str]) -> dict[str, str]:
+    try:
+        journal = json.loads(raw.get("Extension Transaction", ""))
+        if not isinstance(journal, dict) or not all(
+            isinstance(v, str) for v in journal.values()
+        ):
+            raise ValueError("Invalid saved extension transaction.")
+        _validated_extension_entry(journal)
+        if (
+            journal["Extension ID"] != raw.get("Extension ID")
+            or journal["Ticket"]
+            != _first(raw, ["Pawn / Loan No.", "Submission ID"])
+            or journal["Submission ID"]
+            != _display_text(raw.get("Submission ID", ""))
+        ):
+            raise ValueError(
+                "Saved extension identity differs from the ticket."
+            )
+        return journal
+    except (ValueError, KeyError, TypeError) as e:
+        logging.exception(f"Error: {e}")
+        raise ValueError(
+            "Saved extension details are invalid. Preserve them and reconcile the worksheet manually; do not repeat the payment."
+        ) from None
+
+
+def _verify_extension_primary(
+    raw: dict[str, str], journal: dict[str, str]
+) -> None:
+    updates = json.loads(journal["Primary Updates"])
+    if (
+        not isinstance(updates, dict)
+        or not updates
+        or any(raw.get(k, "") != v for k, v in updates.items())
+    ):
+        raise ValueError(
+            "Saved extension primary values cannot be verified. Preserve the transaction and inspect the ticket; no payment has been appended."
+        )
+
+
+def _extension_ledger_rows(spreadsheet) -> tuple[object, list[dict[str, str]]]:
+    import gspread
+
+    try:
+        ledger = spreadsheet.worksheet("Extension Payments")
+    except gspread.WorksheetNotFound:
+        logging.exception("Unexpected error")
+        return None, []
+    values = ledger.get_all_values()
+    if not values:
+        return ledger, []
+    if len(set(values[0])) != len(values[0]) or not set(
+        EXTENSION_COLUMNS
+    ).issubset(values[0]):
+        raise ValueError(
+            "Extension Payments headers are incomplete or duplicated. Preserve historical rows and repair the headers."
+        )
+    return ledger, [
+        {
+            name: row[i].strip() if i < len(row) else ""
+            for i, name in enumerate(values[0])
+        }
+        for row in values[1:]
+        if any(row)
+    ]
+
+
+def _load_extension_payments(spreadsheet) -> tuple[list[ExtensionPayment], str]:
+    ledger, rows = _extension_ledger_rows(spreadsheet)
+    if ledger is None:
+        return (
+            [],
+            "No extension payments worksheet yet. It is created only when an operator extends a ticket.",
+        )
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        grouped.setdefault(row.get("Extension ID", ""), []).append(row)
+    payments: list[ExtensionPayment] = []
+    rejected = 0
+    for group in grouped.values():
+        if any(row != group[0] for row in group[1:]):
+            rejected += len(group)
+            continue
+        raw = group[0]
+        if (
+            raw.get("Status") != "Verified"
+            or raw.get("Verification") != "Primary read-back verified"
+        ):
+            rejected += len(group)
+            continue
+        try:
+            payments.append(_validated_extension_entry(raw))
+        except (ValueError, KeyError) as e:
+            logging.exception(f"Error: {e}")
+            rejected += len(group)
+    duplicates = len(rows) - len(grouped)
+    message = f"{len(payments)} verified extension payments loaded."
+    if rejected or duplicates:
+        message = f"{message} Review ledger: {rejected} invalid/unverified/conflicting rows excluded; {duplicates} duplicate IDs counted at most once. Historical rows were not changed."
+    return sorted(
+        payments,
+        key=lambda p: (p["payment_date"], p["extension_id"]),
+        reverse=True,
+    ), message
+
+
+def _append_extension_payment(spreadsheet, journal: dict[str, str]) -> None:
+    _validated_extension_entry(journal)
+    ledger, rows = _extension_ledger_rows(spreadsheet)
+    matches = [
+        row
+        for row in rows
+        if row.get("Extension ID") == journal["Extension ID"]
+    ]
+    if matches:
+        if len(matches) != 1 or any(
+            matches[0].get(k) != journal[k] for k in EXTENSION_COLUMNS
+        ):
+            raise ValueError(
+                "Existing extension ledger ID has conflicting or duplicate entries. Preserve history and reconcile; no row was overwritten."
+            )
+        return
+    if ledger is None:
+        try:
+            ledger = spreadsheet.add_worksheet(
+                title="Extension Payments",
+                rows=1000,
+                cols=len(EXTENSION_COLUMNS),
+            )
+        except Exception as e:
+            logging.exception(f"Error: {e}")
+            ledger, rows = _extension_ledger_rows(spreadsheet)
+            if ledger is None:
+                raise
+    if not ledger.get_all_values():
+        ledger.update(
+            range_name="A1",
+            values=[list(EXTENSION_COLUMNS)],
+            value_input_option="RAW",
+        )
+    ledger, rows = _extension_ledger_rows(spreadsheet)
+    matches = [
+        r for r in rows if r.get("Extension ID") == journal["Extension ID"]
+    ]
+    if matches:
+        if len(matches) != 1 or any(
+            matches[0].get(k) != journal[k] for k in EXTENSION_COLUMNS
+        ):
+            raise ValueError(
+                "Extension ledger conflict; reconcile existing entries without overwriting history."
+            )
+        return
+    headers = ledger.row_values(1)
+    ledger.append_row(
+        [journal.get(k, "") for k in headers], value_input_option="RAW"
+    )
+    _, saved = _extension_ledger_rows(spreadsheet)
+    matches = [
+        r for r in saved if r.get("Extension ID") == journal["Extension ID"]
+    ]
+    if len(matches) != 1 or any(
+        matches[0].get(k) != journal[k] for k in EXTENSION_COLUMNS
+    ):
+        raise RuntimeError(
+            "Primary extension saved, but payment ledger is not verified. Refresh and reconcile the saved extension; do not collect cash again."
+        )
+
+
+def _monthly_realized_interest(
+    records: list[LoanRecord], payments: list[ExtensionPayment], month: str
+) -> float:
+    settlement = [
+        Decimal(r["settlement_realized_profit"])
+        for r in records
+        if r["status"] == "Settled"
+        and not _is_sold(r["liquidation_status"])
+        and _date_value(r["date_settled"])
+        and r["date_settled"][:7] == month
+    ]
+    unique = {
+        p["extension_id"]: p for p in payments if p["status"] == "Verified"
+    }
+    return _sum_cents(
+        settlement
+        + [
+            Decimal(p["interest"])
+            for p in unique.values()
+            if p["payment_date"][:7] == month
+        ]
+    )
 
 
 SETTLEMENT_COLUMNS: tuple[str, ...] = (
@@ -1939,7 +2695,7 @@ def _live_settlement_amounts(
             "Loan Date",
         ],
     )
-    due = _resolved_due_date(raw.get("Maturity / Due Date", ""), issue)
+    due = _record_due_date(raw, issue)
     if due is None:
         raise ValueError(
             "The live due date and issue date are missing or invalid. Correct the worksheet before settling."
@@ -2017,6 +2773,15 @@ def _record_settlement(
                 "Ticket must match exactly one live worksheet row. Refresh Sheets and resolve missing or duplicate ticket numbers."
             )
         row_index, raw, original_row = matches[0]
+        if raw.get("Extension ID", ""):
+            journal = _extension_journal(raw)
+            spreadsheet = sheet.spreadsheet
+            existing, _ = _load_extension_payments(spreadsheet)
+            if not any(
+                p["extension_id"] == journal["Extension ID"] for p in existing
+            ):
+                _verify_extension_primary(raw, journal)
+                _append_extension_payment(spreadsheet, journal)
         if (
             submission_id not in {"", "—"}
             and raw.get("Submission ID", "") != submission_id
@@ -2166,6 +2931,12 @@ def _mutate_live_ticket(
             .open_by_key(os.environ["GOOGLE_SHEETS_SPREADSHEET_ID"])
             .worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
         )
+        if operation == "interest_extension" or (
+            operation == "status" and value == "Extended"
+        ):
+            raise ValueError(
+                "Use the verified Extend 30 days action with cash payment."
+            )
         values = sheet.get_all_values()
         headers = values[0]
         required = [
@@ -2211,7 +2982,6 @@ def _mutate_live_ticket(
         principal = _money(raw.get("Approved Loan Amount", ""))
         remaining = _money(raw.get("Remaining Principal", "")) or principal
         interest = _money(raw.get("Interest Amount", ""))
-        due = _date_value(raw.get("Maturity / Due Date", "")) or date.today()
         updates: dict[str, str] = {"Last Updated": _gaborone_now()}
         if operation == "partial":
             amount = _money(value)
@@ -2225,24 +2995,8 @@ def _mutate_live_ticket(
                     "Status": "Settled" if remaining <= 0 else "Active",
                     "Remaining Principal": f"{remaining:.2f}",
                     "Payment Amount": f"{amount:.2f}",
-                    "Payment Date": second or date.today().isoformat(),
+                    "Payment Date": _validated_payment_date(second),
                     "Payment Type": "Partial Principal",
-                }
-            )
-        elif operation == "interest_extension":
-            amount = _money(value)
-            if amount < interest:
-                raise ValueError(
-                    "Interest-only extension must cover at least the current interest."
-                )
-            due += timedelta(days=30)
-            updates.update(
-                {
-                    "Status": "Extended",
-                    "Maturity / Due Date": due.strftime("%d/%m/%Y"),
-                    "Payment Amount": f"{amount:.2f}",
-                    "Payment Date": second or date.today().isoformat(),
-                    "Payment Type": "Interest-only Extension",
                 }
             )
         elif operation == "delete":
@@ -2263,20 +3017,8 @@ def _mutate_live_ticket(
                     {
                         "Status": "Settled",
                         "Payment Amount": f"{amount:.2f}",
-                        "Payment Date": third or date.today().isoformat(),
+                        "Payment Date": _validated_payment_date(third),
                         "Payment Type": "Settlement",
-                    }
-                )
-            elif status == "Extended":
-                rate = interest / principal if principal else 0.0
-                due += timedelta(days=30)
-                next_interest = remaining * rate
-                updates.update(
-                    {
-                        "Status": "Extended",
-                        "Maturity / Due Date": due.strftime("%d/%m/%Y"),
-                        "Interest Amount": f"{next_interest:.2f}",
-                        "Total Amount Due": f"{remaining + next_interest:.2f}",
                     }
                 )
             else:

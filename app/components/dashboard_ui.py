@@ -3,6 +3,7 @@ from app.states.dashboard_state import (
     DashboardState,
     LoanRecord,
     ReminderRow,
+    ExtensionPayment,
 )
 
 SURFACE = rx.color_mode_cond(
@@ -305,7 +306,7 @@ def dashboard_panel() -> rx.Component:
             metric_card(
                 "Monthly realized interest",
                 DashboardState.realized_interest,
-                "Interest, late fees and retained overpayment from settled loans issued in the selected month; excludes inventory sales.",
+                "Earned-month basis: verified extension interest by payment date, plus settled-loan profit by settlement date. All live months uses the current Botswana month. Excludes extension excess and inventory sales.",
                 "trending-up",
             ),
             metric_card(
@@ -569,6 +570,14 @@ def operations_panel() -> rx.Component:
             ),
             class_name=["border-b pb-5", BORDER],
         ),
+        rx.el.button(
+            rx.icon("refresh-cw", class_name="h-4 w-4"),
+            "Refresh Sheets",
+            on_click=DashboardState.refresh_sheets,
+            disabled=DashboardState.is_loading
+            | DashboardState.operation_loading,
+            class_name="mt-3 flex items-center gap-2 border border-slate-200 bg-white px-3 py-2 text-xs text-[#189b2b] hover:bg-slate-50",
+        ),
         rx.el.div(
             rx.el.label(
                 "Search tickets, customers, mobile or items",
@@ -829,16 +838,29 @@ def ticket_control_surface() -> rx.Component:
                 ),
                 class_name="relative mt-4 w-48",
             ),
-            rx.el.input(
-                placeholder="Cash tendered / payment amount",
-                aria_label="Cash tendered or payment amount",
-                input_mode="decimal",
-                on_change=DashboardState.set_payment_amount,
-                class_name=[
-                    f"mt-4 rounded-sm border px-3 py-2 text-sm {FOCUS}",
-                    FIELD,
-                ],
-                default_value=DashboardState.payment_amount,
+            rx.el.div(
+                rx.el.label(
+                    "CASH RECEIVED · SETTLEMENT OR EXTENSION (P)",
+                    html_for="ticket-cash",
+                    class_name=[
+                        "block font-['IBM_Plex_Mono'] text-[10px] font-semibold tracking-wide",
+                        TEXT_SECONDARY,
+                    ],
+                ),
+                rx.el.input(
+                    id="ticket-cash",
+                    placeholder="e.g. 300.00",
+                    aria_label="Cash received for settlement or interest extension in pula",
+                    input_mode="decimal",
+                    on_change=DashboardState.set_payment_amount,
+                    disabled=DashboardState.operation_loading,
+                    class_name=[
+                        "mt-1 w-full rounded-sm border px-3 py-2 text-sm outline-hidden focus:ring-2 focus:ring-[#189b2b] disabled:opacity-50",
+                        FIELD,
+                    ],
+                    default_value=DashboardState.payment_amount,
+                ),
+                class_name="mt-3 w-full sm:w-72",
             ),
             rx.cond(
                 DashboardState.settlement_eligible,
@@ -854,15 +876,50 @@ def ticket_control_surface() -> rx.Component:
                 ),
                 rx.fragment(),
             ),
+            rx.cond(
+                DashboardState.selected_record["extension_pending"],
+                rx.el.button(
+                    rx.icon("refresh-cw", class_name="h-4 w-4"),
+                    "Reconcile saved extension · no new cash",
+                    on_click=DashboardState.reconcile_extension,
+                    disabled=DashboardState.operation_loading
+                    | DashboardState.is_loading,
+                    class_name="mt-4 flex items-center gap-2 border border-[#189b2b]/40 bg-white px-3 py-2 text-xs font-semibold text-[#189b2b] hover:bg-green-50 disabled:opacity-50",
+                ),
+                rx.fragment(),
+            ),
             rx.el.button(
-                "Extend 30 days",
-                on_click=DashboardState.update_ticket_status("Extended"),
+                rx.cond(
+                    DashboardState.operation_loading,
+                    "Verifying…",
+                    "Extend 30 days",
+                ),
+                on_click=DashboardState.extend_ticket,
+                disabled=DashboardState.operation_loading
+                | DashboardState.is_loading
+                | (DashboardState.extension_validation != ""),
                 class_name=[
-                    f"mt-4 rounded-sm border px-3 py-2 text-xs font-semibold {FOCUS}",
+                    "mt-4 rounded-sm border px-3 py-2 text-xs font-semibold outline-hidden focus:ring-2 focus:ring-[#189b2b] disabled:cursor-not-allowed disabled:opacity-50",
                     GHOST_BTN,
                 ],
             ),
             class_name="flex flex-wrap items-start gap-2",
+        ),
+        rx.el.p(
+            f"Extension requires current interest of P{DashboardState.selected_record['interest']:.2f}. Principal stays outstanding. New due date is 30 days after today or the current due date, whichever is later.",
+            class_name=["mt-2 text-xs leading-5", TEXT_SECONDARY],
+        ),
+        rx.cond(
+            DashboardState.extension_validation != "",
+            rx.el.p(
+                DashboardState.extension_validation,
+                role="alert",
+                class_name=["mt-2 text-xs font-medium", DANGER_TEXT],
+            ),
+            rx.el.p(
+                "Extension payment validated; live values will be rechecked before saving.",
+                class_name=["mt-2 text-xs", ACCENT_TEXT],
+            ),
         ),
         rx.cond(
             DashboardState.settlement_eligible,
@@ -1264,6 +1321,15 @@ def history_panel() -> rx.Component:
             "Search by Omang / Passport No. or normalized mobile. Identity details remain hidden until a match is selected.",
             class_name=["mt-2 text-sm", TEXT_SECONDARY],
         ),
+        rx.el.button(
+            rx.icon("refresh-cw", class_name="h-4 w-4"),
+            "Refresh history",
+            on_click=DashboardState.refresh_sheets,
+            disabled=DashboardState.is_loading
+            | DashboardState.operation_loading,
+            class_name="mt-3 flex items-center gap-2 border border-slate-200 bg-white px-3 py-2 text-xs text-[#189b2b] hover:bg-slate-50",
+        ),
+        inventory_feedback(),
         rx.el.input(
             placeholder="Search stable identity or mobile",
             default_value=DashboardState.history_search,
@@ -1279,7 +1345,13 @@ def history_panel() -> rx.Component:
                 DashboardState.history_records,
                 lambda record: rx.el.button(
                     record["customer"],
-                    on_click=DashboardState.select_customer(record["omang"]),
+                    on_click=DashboardState.select_customer(
+                        rx.cond(
+                            (record["omang"] != "—") & (record["omang"] != ""),
+                            record["omang"],
+                            record["mobile"],
+                        )
+                    ),
                     class_name=[
                         f"mt-3 block w-full max-w-xl rounded-sm border px-3 py-2 text-left text-sm font-medium {FOCUS}",
                         SURFACE,
@@ -1330,6 +1402,7 @@ def customer_dossier() -> rx.Component:
             ),
             class_name=["mt-5 rounded-sm border", SURFACE],
         ),
+        extension_payment_table(DashboardState.customer_extension_payments),
         class_name=[
             "mt-5 rounded-sm border p-5",
             rx.color_mode_cond(
@@ -1610,9 +1683,121 @@ def valuation_panel(
     )
 
 
+def extension_payment_row(payment: ExtensionPayment) -> rx.Component:
+    return rx.el.tr(
+        rx.el.td(
+            payment["payment_date"],
+            class_name="whitespace-nowrap px-3 py-3 font-['IBM_Plex_Mono'] text-slate-700",
+        ),
+        rx.el.td(
+            payment["ticket"],
+            class_name="px-3 py-3 font-['IBM_Plex_Mono'] text-[#189b2b]",
+        ),
+        rx.el.td(
+            f"P{payment['cash']:,.2f}",
+            class_name="px-3 py-3 font-['IBM_Plex_Mono'] text-slate-900",
+        ),
+        rx.el.td(
+            f"P{payment['interest']:,.2f}",
+            class_name="px-3 py-3 font-['IBM_Plex_Mono'] text-[#189b2b]",
+        ),
+        rx.el.td(
+            f"P{payment['excess']:,.2f}",
+            class_name="px-3 py-3 font-['IBM_Plex_Mono'] text-slate-700",
+        ),
+        rx.el.td(
+            f"{payment['old_due']} → {payment['new_due']}",
+            class_name="whitespace-nowrap px-3 py-3 font-['IBM_Plex_Mono'] text-slate-700",
+        ),
+        rx.el.td(
+            f"P{payment['principal']:,.2f}",
+            class_name="px-3 py-3 font-['IBM_Plex_Mono'] text-slate-700",
+        ),
+        rx.el.td(payment["status"], class_name="px-3 py-3 text-[#189b2b]"),
+        key=payment["extension_id"],
+        class_name="border-b border-slate-100 bg-white even:bg-slate-50 hover:bg-green-50/50",
+    )
+
+
+def extension_payment_table(
+    payments: rx.Var[list[ExtensionPayment]],
+) -> rx.Component:
+    return rx.el.section(
+        rx.el.div(
+            rx.icon("receipt-text", class_name="h-4 w-4 text-[#189b2b]"),
+            rx.el.h2(
+                "Persisted extension payments",
+                class_name="text-sm font-semibold text-slate-900",
+            ),
+            class_name="flex items-center gap-2",
+        ),
+        rx.el.p(
+            DashboardState.extension_ledger_message,
+            class_name="mt-2 text-xs text-slate-600",
+        ),
+        rx.el.p(
+            "Current interest paid is earned on the payment date. Excess remains unapplied, not realized interest. Historical payments are separate from the next-cycle settlement.",
+            class_name="mt-1 text-xs text-slate-600",
+        ),
+        rx.cond(
+            payments.length() > 0,
+            rx.el.div(
+                rx.el.div(
+                    rx.el.table(
+                        rx.el.thead(
+                            rx.el.tr(
+                                rx.foreach(
+                                    [
+                                        "Payment date",
+                                        "Ticket",
+                                        "Cash received",
+                                        "Interest earned",
+                                        "Unapplied excess",
+                                        "Old due → New due",
+                                        "Principal remaining",
+                                        "Verification",
+                                    ],
+                                    _th,
+                                ),
+                                class_name="border-b border-slate-200 bg-slate-50",
+                            )
+                        ),
+                        rx.el.tbody(
+                            rx.foreach(payments, extension_payment_row)
+                        ),
+                        class_name="table-auto w-full min-w-[1050px] text-xs",
+                    ),
+                    class_name="overflow-x-auto",
+                ),
+                class_name="mt-3 overflow-hidden border border-slate-200 bg-white",
+            ),
+            rx.el.div(
+                rx.icon("receipt", class_name="h-5 w-5 text-slate-400"),
+                rx.el.p(
+                    "No verified extension payments in this view.",
+                    class_name="text-sm font-medium text-slate-700",
+                ),
+                rx.el.p(
+                    "Refresh Sheets after an extension. Legacy ticket-only extensions are not assumed to be verified cash receipts; check the month and ticket filters.",
+                    class_name="text-xs text-slate-500",
+                ),
+                class_name="mt-3 flex flex-col items-center gap-2 border border-slate-200 bg-slate-50 p-6 text-center",
+            ),
+        ),
+        class_name="mt-5 w-full border border-slate-200 bg-white p-4",
+    )
+
+
 def scheduled_panel() -> rx.Component:
     return rx.el.div(
-        integration_strip(), operations_panel(), class_name="w-full"
+        integration_strip(),
+        operations_panel(),
+        rx.cond(
+            DashboardState.active_tab == "payments",
+            extension_payment_table(DashboardState.visible_extension_payments),
+            rx.fragment(),
+        ),
+        class_name="w-full",
     )
 
 
