@@ -65,6 +65,8 @@ class LoanRecord(TypedDict):
     recommended_price: float
     submission_id: str
     extension_pending: bool
+    historical_extension_eligible: bool
+    source_snapshot: dict[str, str]
 
 
 NOTICE_TEMPLATES: dict[str, str] = {
@@ -130,6 +132,8 @@ EMPTY_RECORD: LoanRecord = {
     "recommended_price": 0.0,
     "submission_id": "",
     "extension_pending": False,
+    "historical_extension_eligible": False,
+    "source_snapshot": {},
 }
 
 
@@ -356,6 +360,7 @@ def _settlement_display(
 
 
 class ReminderRow(TypedDict):
+    cycle_start: str
     ticket: str
     customer: str
     contact: str
@@ -653,6 +658,8 @@ class DashboardState(rx.State):
     notice_type: str = "Pre-Due"
     payment_amount: str = ""
     payment_date: str = ""
+    historical_payment_date: str = ""
+    historical_cash_confirmed: bool = False
     confirmation_text: str = ""
     delete_confirmed: bool = False
     operation_loading: bool = False
@@ -789,6 +796,10 @@ class DashboardState(rx.State):
                     "customer": record["customer"] or "—",
                     "contact": record["contact"] or record["mobile"] or "—",
                     "issue_date": issue.isoformat() if issue else "—",
+                    "cycle_start": _verified_cycle_start(
+                        record, self.extension_payments
+                    )
+                    or (issue.isoformat() if issue else "—"),
                     "maturity_date": due.isoformat(),
                     "description": record["description"]
                     or record["item"]
@@ -1083,6 +1094,47 @@ class DashboardState(rx.State):
         )
 
     @rx.var
+    def historical_extension_eligible(self) -> bool:
+        return (
+            self.active_tab == "ledger"
+            and self.selected_record["historical_extension_eligible"]
+        )
+
+    @rx.var
+    def historical_extension_validation(self) -> str:
+        if not self.historical_extension_eligible:
+            return "Select an unsold Extended ticket without receipt or transaction details."
+        try:
+            _historical_extension_date(
+                self.historical_payment_date,
+                _date_value(self.selected_record["issue_date"]),
+                _gaborone_date(),
+                self.historical_cash_confirmed,
+            )
+            _extension_cash(
+                self.payment_amount, self.selected_record["interest"]
+            )
+        except ValueError as e:
+            return str(e)
+        return ""
+
+    @rx.event
+    def set_historical_payment_date(self, value: str):
+        if not self.operation_loading:
+            self.historical_payment_date = value
+            self.historical_cash_confirmed = False
+            self.extension_error = ""
+
+    @rx.event
+    def toggle_historical_cash_confirmation(self):
+        if not self.operation_loading:
+            self.historical_cash_confirmed = not self.historical_cash_confirmed
+
+    @rx.event
+    def record_previously_paid_extension(self):
+        return DashboardState.extend_ticket(True)
+
+    @rx.var
     def extension_validation(self) -> str:
         if self.extension_error:
             return self.extension_error
@@ -1090,6 +1142,8 @@ class DashboardState(rx.State):
             return "Saved extension needs reconciliation before another payment. No additional cash is required."
         if not self.settlement_eligible:
             return "Select an unsold Active or Extended ticket to extend."
+        if _unrecorded_extended(self.selected_record):
+            return "Legacy Extended ticket has no verified transaction. Record the previously paid extension first; do not collect new cash."
         try:
             _extension_cash(
                 self.payment_amount, self.selected_record["interest"]
@@ -1101,7 +1155,7 @@ class DashboardState(rx.State):
         return ""
 
     @rx.event
-    async def extend_ticket(self):
+    async def extend_ticket(self, historical: bool = False):
         if self.operation_loading or self.is_loading:
             return
         self._clear_extension_confirmation()
@@ -1118,6 +1172,21 @@ class DashboardState(rx.State):
             self.extension_error = "Reconcile the saved extension first; do not collect another payment."
             return
         try:
+            if historical:
+                if not self.historical_extension_eligible:
+                    raise ValueError(
+                        "Historical recording is only available in Active Pawn Ledger for eligible Extended tickets."
+                    )
+                _historical_extension_date(
+                    self.historical_payment_date,
+                    _date_value(expected["issue_date"]),
+                    _gaborone_date(),
+                    self.historical_cash_confirmed,
+                )
+            elif _unrecorded_extended(expected):
+                raise ValueError(
+                    "Record the previously paid extension first; do not collect new cash."
+                )
             _extension_cash(self.payment_amount, expected["interest"])
             if _date_value(expected["due_date"]) is None:
                 raise ValueError(
@@ -1126,8 +1195,16 @@ class DashboardState(rx.State):
             self.operation_loading = True
             yield
             result = await asyncio.to_thread(
-                _record_extension, expected, self.payment_amount
+                _record_extension,
+                expected,
+                self.payment_amount,
+                False,
+                historical,
+                self.historical_payment_date,
+                self.historical_cash_confirmed,
             )
+            self.historical_payment_date = ""
+            self.historical_cash_confirmed = False
             self.payment_amount = ""
             self.selected_ticket = ""
             try:
@@ -1190,6 +1267,8 @@ class DashboardState(rx.State):
         self._clear_extension_confirmation()
         self.selected_ticket = ticket
         self.payment_amount = ""
+        self.historical_payment_date = ""
+        self.historical_cash_confirmed = False
         self.extension_error = ""
 
     @rx.event
@@ -1201,6 +1280,7 @@ class DashboardState(rx.State):
         if not self.operation_loading:
             self._clear_extension_confirmation()
             self.payment_amount = value
+            self.historical_cash_confirmed = False
             self.extension_error = ""
 
     @rx.event
@@ -1501,6 +1581,8 @@ class DashboardState(rx.State):
         if self.operation_loading:
             return
         self._clear_extension_confirmation()
+        self.historical_payment_date = ""
+        self.historical_cash_confirmed = False
         self.is_loading = True
         self.error_message = ""
         self.success_message = ""
@@ -2302,6 +2384,10 @@ def _read_live_records() -> dict[str, object]:
                     "submission_id": _display_text(
                         raw.get("Submission ID", "")
                     ),
+                    "source_snapshot": raw.copy(),
+                    "historical_extension_eligible": _historical_row_eligible(
+                        raw
+                    ),
                     "extension_pending": bool(raw.get("Extension ID", ""))
                     and raw.get("Extension ID", "") not in verified_ids,
                 }
@@ -2374,8 +2460,120 @@ def _extension_fingerprint(record: LoanRecord) -> str:
     )
 
 
+HISTORICAL_PAYMENT_TYPE = "Previously Paid Interest Extension · no new cash"
+
+
+RECEIPT_COLUMNS: tuple[str, ...] = (
+    "Payment Amount",
+    "Payment Date",
+    "Payment Type",
+    "Extension ID",
+    "Extension Transaction",
+    "Date Settled",
+    "Settlement Date",
+    "Final Payout (BWP)",
+    "Settlement Realized Profit",
+    "Sale Date",
+    "Final Cash Revenue",
+)
+
+
+def _historical_row_eligible(raw: dict[str, str]) -> bool:
+    return (
+        _first(raw, ["Status", "Loan Status"]).casefold() == "extended"
+        and not _is_sold(raw.get("Liquidation Status", ""))
+        and not any(raw.get(key, "").strip() for key in RECEIPT_COLUMNS)
+    )
+
+
+def _unrecorded_extended(record: LoanRecord) -> bool:
+    raw = record.get("source_snapshot", {})
+    return record["status"] == "Extended" and not (
+        raw.get("Extension ID", "").strip()
+        and raw.get("Extension Transaction", "").strip()
+    )
+
+
+def _historical_extension_date(
+    value: str, issue: date | None, today: date, confirmed: bool
+) -> date:
+    text = value.strip()
+    parsed = _date_value(text)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) or parsed is None:
+        raise ValueError(
+            "Enter the actual historical payment date as YYYY-MM-DD; no date is assumed."
+        )
+    if issue is None or parsed < issue:
+        raise ValueError(
+            "Historical payment date must be on or after the original issue date."
+        )
+    if parsed > today:
+        raise ValueError("Historical payment date cannot be in the future.")
+    if not confirmed:
+        raise ValueError(
+            "Explicitly confirm this cash was already received; this action collects no new cash."
+        )
+    return parsed
+
+
+def _verified_cycle_start(
+    record: LoanRecord, payments: list[ExtensionPayment]
+) -> str:
+    if record["status"] != "Extended" or record["extension_pending"]:
+        return ""
+    matches = [
+        p
+        for p in payments
+        if p["ticket"] == record["ticket"]
+        and p["submission_id"] == record["submission_id"]
+        and p["new_due"] == record["due_date"]
+        and p["payment_date"] == record["payment_date"]
+    ]
+    if not matches or any(p != matches[0] for p in matches[1:]):
+        return ""
+    payment = matches[0]
+    try:
+        identity = _extension_id(
+            payment["ticket"], payment["submission_id"], payment["old_due"]
+        )
+    except ValueError:
+        return ""
+    if (
+        payment["extension_id"] != identity
+        or payment["status"] != "Verified"
+        or not _date_value(payment["payment_date"])
+        or not math.isfinite(payment["cash"])
+        or not math.isfinite(payment["interest"])
+        or not 0 <= payment["interest"] <= payment["cash"]
+        or payment["cash"] <= 0
+        or payment["principal"] != record["remaining_principal"]
+    ):
+        return ""
+    return payment["payment_date"]
+
+
+def _reject_historical_duplicate(
+    spreadsheet, ticket: str, old_due: str
+) -> None:
+    _, rows = _extension_ledger_rows(spreadsheet)
+    if any(
+        row.get("Ticket") == ticket
+        and _iso_or_raw(row.get("Old Due", "")) == old_due
+        for row in rows
+    ):
+        raise ValueError(
+            "A payment for this ticket and old due date already exists, even if unverified. Reconcile it; do not record another receipt."
+        )
+
+
 def _extension_updates(
-    raw: dict[str, str], expected: LoanRecord, cash: str, today: date
+    raw: dict[str, str],
+    expected: LoanRecord,
+    cash: str,
+    today: date,
+    historical: bool = False,
+    historical_date: str = "",
+    confirmed: bool = False,
 ) -> dict[str, str]:
     status = _first(raw, ["Status", "Loan Status"]).title() or "Active"
     if status not in {"Active", "Extended"} or _is_sold(
@@ -2413,6 +2611,30 @@ def _extension_updates(
             "Timestamp",
         ],
     )
+    if historical:
+        if not _historical_row_eligible(raw):
+            raise ValueError(
+                "Historical recording requires an unsold Extended row with no existing receipt or extension transaction."
+            )
+        snapshot = expected.get("source_snapshot", {})
+        if not snapshot or raw != {
+            key: value.strip() for key, value in snapshot.items()
+        }:
+            raise ValueError(
+                "Live historical row changed since selection. Refresh and review before recording."
+            )
+        cycle_date = _historical_extension_date(
+            historical_date, issue, today, confirmed
+        )
+    else:
+        if status == "Extended" and not (
+            raw.get("Extension ID", "").strip()
+            and raw.get("Extension Transaction", "").strip()
+        ):
+            raise ValueError(
+                "Unrecorded legacy Extended ticket: record previously paid extension first; no new cash."
+            )
+        cycle_date = today
     due = _record_due_date(raw, issue)
     if due is None:
         raise ValueError(
@@ -2455,7 +2677,7 @@ def _extension_updates(
             "The live status, due date or amounts changed. Refresh and review before extending."
         )
     tender = _extension_cash(cash, interest)
-    new_due = max(today, due) + timedelta(days=30)
+    new_due = max(cycle_date, due) + timedelta(days=30)
     next_interest = _settlement_money(remaining * interest / principal)
     return {
         "Status": "Extended",
@@ -2464,8 +2686,15 @@ def _extension_updates(
         "Day 30 Due Action": new_due.isoformat(),
         "Day 35 Final Warning": (new_due + timedelta(days=5)).isoformat(),
         "Payment Amount": f"{tender:.2f}",
-        "Payment Date": today.isoformat(),
-        "Payment Type": "Interest Extension",
+        "Payment Date": cycle_date.isoformat(),
+        "Payment Type": HISTORICAL_PAYMENT_TYPE
+        if historical
+        else "Interest Extension",
+        **{
+            key: ""
+            for key in ("Day 23 Status", "Day 30 Status", "Day 35 Status")
+            if key in raw
+        },
         "Remaining Principal": f"{remaining:.2f}",
         "Interest Amount": f"{next_interest:.2f}",
         "Total Amount Due": f"{remaining + next_interest:.2f}",
@@ -2480,6 +2709,9 @@ def _write_ticket_extension(
     today: date,
     spreadsheet=None,
     repair: bool = False,
+    historical: bool = False,
+    historical_date: str = "",
+    confirmed: bool = False,
 ) -> ExtensionWriteResult:
     """Optimistic live check, append-only headers, one RAW batch, then read-back."""
     import gspread
@@ -2513,6 +2745,31 @@ def _write_ticket_extension(
     requested_id = _extension_fingerprint(expected)
     if saved_id:
         journal = _extension_journal(raw)
+        if historical:
+            if (
+                _is_sold(raw.get("Liquidation Status", ""))
+                or raw.get("Date Settled", "").strip()
+                or raw.get("Settlement Date", "").strip()
+            ):
+                raise ValueError(
+                    "Settled or sold tickets cannot record a historical extension."
+                )
+            parsed = _historical_extension_date(
+                historical_date,
+                _date_value(expected["issue_date"]),
+                today,
+                confirmed,
+            )
+            if (
+                repair
+                or saved_id != requested_id
+                or journal["Payment Date"] != parsed.isoformat()
+                or json.loads(journal["Primary Updates"]).get("Payment Type")
+                != HISTORICAL_PAYMENT_TYPE
+            ):
+                raise ValueError(
+                    "An extension transaction already exists. Historical recording cannot replace it."
+                )
         if saved_id == requested_id or repair:
             if not repair and _settlement_cash(cash) != Decimal(
                 journal["Cash Received"]
@@ -2542,7 +2799,13 @@ def _write_ticket_extension(
         raise ValueError(
             "No durable extension transaction is available to reconcile."
         )
-    updates = _extension_updates(raw, expected, cash, today)
+    updates = _extension_updates(
+        raw, expected, cash, today, historical, historical_date, confirmed
+    )
+    if historical:
+        _reject_historical_duplicate(
+            spreadsheet, expected["ticket"], expected["due_date"]
+        )
     journal = {
         "Extension ID": requested_id,
         "Ticket": expected["ticket"],
@@ -2591,6 +2854,10 @@ def _write_ticket_extension(
         raise ValueError(
             "Live row changed during preparation; refresh and inspect before retrying."
         )
+    if historical:
+        _reject_historical_duplicate(
+            spreadsheet, expected["ticket"], expected["due_date"]
+        )
     columns = {name: headers.index(name) for name in updates}
     sheet.batch_update(
         [
@@ -2625,7 +2892,12 @@ def _write_ticket_extension(
 
 
 def _record_extension(
-    expected: LoanRecord, cash: str, repair: bool = False
+    expected: LoanRecord,
+    cash: str,
+    repair: bool = False,
+    historical: bool = False,
+    historical_date: str = "",
+    confirmed: bool = False,
 ) -> ExtensionWriteResult:
     try:
         import gspread
@@ -2640,7 +2912,15 @@ def _record_extension(
         )
         sheet = spreadsheet.worksheet(os.environ["GOOGLE_SHEETS_WORKSHEET"])
         return _write_ticket_extension(
-            sheet, expected, cash, _gaborone_date(), spreadsheet, repair
+            sheet,
+            expected,
+            cash,
+            _gaborone_date(),
+            spreadsheet,
+            repair,
+            historical,
+            historical_date,
+            confirmed,
         )
     except ValueError:
         raise
@@ -2710,7 +2990,13 @@ def _extension_verified_result(
 
 
 def _extension_result(journal: dict[str, str]) -> str:
-    return f"Extension saved and verified in ticket and payment ledger · cash P{Decimal(journal['Cash Received']):,.2f} · interest P{Decimal(journal['Interest Realized']):,.2f} · due {journal['New Due']}."
+    mode = json.loads(journal["Primary Updates"]).get("Payment Type", "")
+    prefix = (
+        "Previously paid extension recorded · no new cash. "
+        if mode == HISTORICAL_PAYMENT_TYPE
+        else ""
+    )
+    return f"{prefix}Extension saved and verified in ticket and payment ledger · cash P{Decimal(journal['Cash Received']):,.2f} · interest P{Decimal(journal['Interest Realized']):,.2f} · due {journal['New Due']}."
 
 
 def _validated_extension_entry(raw: dict[str, str]) -> ExtensionPayment:
@@ -2877,6 +3163,19 @@ def _load_extension_payments(spreadsheet) -> tuple[list[ExtensionPayment], str]:
 def _append_extension_payment(spreadsheet, journal: dict[str, str]) -> None:
     _validated_extension_entry(journal)
     ledger, rows = _extension_ledger_rows(spreadsheet)
+    if (
+        json.loads(journal["Primary Updates"]).get("Payment Type")
+        == HISTORICAL_PAYMENT_TYPE
+    ):
+        if any(
+            row.get("Ticket") == journal["Ticket"]
+            and _iso_or_raw(row.get("Old Due", "")) == journal["Old Due"]
+            and row.get("Extension ID") != journal["Extension ID"]
+            for row in rows
+        ):
+            raise ValueError(
+                "Another historical receipt for this ticket and old due exists. Reconcile without collecting cash."
+            )
     matches = [
         row
         for row in rows

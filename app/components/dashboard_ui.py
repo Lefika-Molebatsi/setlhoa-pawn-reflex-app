@@ -852,7 +852,7 @@ def ticket_control_surface() -> rx.Component:
                     placeholder="e.g. 300.00",
                     aria_label="Cash received for settlement or interest extension in pula",
                     input_mode="decimal",
-                    on_change=DashboardState.set_payment_amount,
+                    on_change=DashboardState.set_payment_amount.debounce(300),
                     disabled=DashboardState.operation_loading,
                     class_name=[
                         "mt-1 w-full rounded-sm border px-3 py-2 text-sm outline-hidden focus:ring-2 focus:ring-[#189b2b] disabled:opacity-50",
@@ -871,7 +871,8 @@ def ticket_control_surface() -> rx.Component:
                         "Settle · record cash",
                     ),
                     on_click=DashboardState.settle_ticket,
-                    disabled=DashboardState.operation_loading,
+                    disabled=DashboardState.operation_loading
+                    | DashboardState.historical_extension_eligible,
                     class_name=f"mt-4 rounded-sm px-3 py-2 text-xs font-semibold disabled:opacity-50 {PRIMARY_BTN} {FOCUS}",
                 ),
                 rx.fragment(),
@@ -894,7 +895,7 @@ def ticket_control_surface() -> rx.Component:
                     "Verifying…",
                     "Extend 30 days",
                 ),
-                on_click=DashboardState.extend_ticket,
+                on_click=lambda: DashboardState.extend_ticket(False),
                 disabled=DashboardState.operation_loading
                 | DashboardState.is_loading
                 | (DashboardState.extension_validation != ""),
@@ -942,6 +943,11 @@ def ticket_control_surface() -> rx.Component:
             on_click=DashboardState.update_ticket_status("Defaulted"),
             class_name=f"mt-3 rounded-sm bg-[#b95b3e] px-3 py-2 text-xs font-semibold text-white hover:bg-[#a24c31] {FOCUS}",
         ),
+        rx.cond(
+            DashboardState.historical_extension_eligible,
+            historical_extension_controls(),
+            rx.fragment(),
+        ),
         ticket_detail_grid(),
         class_name=[
             "mt-5 rounded-sm border p-5",
@@ -950,6 +956,69 @@ def ticket_control_surface() -> rx.Component:
                 "border-[#189b2b]/50 bg-[#202629]",
             ),
         ],
+    )
+
+
+def historical_extension_controls() -> rx.Component:
+    return rx.el.section(
+        rx.el.h3(
+            "Record previously paid extension · no new cash",
+            class_name=["text-sm font-semibold", ACCENT_TEXT],
+        ),
+        rx.el.p(
+            "Extended status and interest are not proof of cash. Enter only the actual cash already received in the amount field above. This records a missing historical receipt, not another collection. New due = later of old due and actual payment date + 30 days. Original issue date stays unchanged.",
+            class_name=["mt-2 text-xs leading-5", TEXT_SECONDARY],
+        ),
+        rx.el.label(
+            "Actual historical payment date · YYYY-MM-DD",
+            html_for="historical-extension-date",
+            class_name=["mt-3 block text-xs font-medium", TEXT_SECONDARY],
+        ),
+        rx.el.input(
+            id="historical-extension-date",
+            type="date",
+            default_value=DashboardState.historical_payment_date,
+            on_change=DashboardState.set_historical_payment_date.debounce(300),
+            disabled=DashboardState.operation_loading,
+            class_name=[
+                "mt-1 w-full rounded-sm border px-3 py-2 text-sm outline-hidden focus:ring-2 focus:ring-[#189b2b] sm:w-72",
+                FIELD,
+            ],
+        ),
+        rx.el.label(
+            rx.el.input(
+                type="checkbox",
+                checked=DashboardState.historical_cash_confirmed,
+                on_change=lambda _: (
+                    DashboardState.toggle_historical_cash_confirmation()
+                ),
+                disabled=DashboardState.operation_loading,
+                class_name="h-4 w-4 shrink-0 accent-[#189b2b]",
+            ),
+            "I confirm this exact cash was already received on the entered date. Do not collect new cash.",
+            class_name=[
+                "mt-3 flex items-center gap-2 text-xs leading-5",
+                TEXT_BODY,
+            ],
+        ),
+        rx.el.p(
+            DashboardState.historical_extension_validation,
+            class_name=["mt-2 text-xs", TEXT_MUTED],
+        ),
+        rx.el.button(
+            rx.icon("receipt-text", class_name="h-4 w-4"),
+            rx.cond(
+                DashboardState.operation_loading,
+                "Verifying historical receipt…",
+                "Record previously paid extension · no new cash",
+            ),
+            on_click=DashboardState.record_previously_paid_extension,
+            disabled=DashboardState.operation_loading
+            | DashboardState.is_loading
+            | (DashboardState.historical_extension_validation != ""),
+            class_name="mt-3 flex items-center gap-2 rounded-sm bg-[#189b2b] px-3 py-2 text-xs font-semibold text-white hover:bg-[#147f23] focus:outline-hidden focus:ring-2 focus:ring-[#189b2b] disabled:cursor-not-allowed disabled:opacity-50",
+        ),
+        class_name=["mt-4 rounded-sm border p-4", INSET],
     )
 
 
@@ -1933,7 +2002,7 @@ REMINDER_COLUMNS: list[str] = [
     "Ticket #",
     "Customer Name",
     "Contact #",
-    "Issue Date",
+    "Cycle start (Day 1)",
     "Maturity Date",
     "Item Description",
     "Total Due (BWP)",
@@ -2020,7 +2089,7 @@ def _reminder_row(row: ReminderRow) -> rx.Component:
             class_name=[CELL, "font-medium", TEXT_STRONG],
         ),
         rx.el.td(row["contact"], class_name=[CELL_MONO, TEXT_BODY]),
-        rx.el.td(row["issue_date"], class_name=[CELL_MONO, TEXT_BODY]),
+        rx.el.td(row["cycle_start"], class_name=[CELL_MONO, TEXT_BODY]),
         rx.el.td(row["maturity_date"], class_name=[CELL_MONO, TEXT_STRONG]),
         rx.el.td(
             row["description"],
@@ -2084,7 +2153,7 @@ def reminders_panel() -> rx.Component:
                     ],
                 ),
                 rx.el.p(
-                    "Active and Extended loans with a valid maturity date, ordered by urgency — the most overdue first. Countdown is measured against today in Africa/Gaborone.",
+                    "Active and Extended loans with a valid maturity date, ordered by urgency — the most overdue first. Cycle start (Day 1) uses the verified extension payment date, otherwise the original issue date. Countdown is measured against today in Africa/Gaborone.",
                     class_name=["mt-2 max-w-3xl text-sm", TEXT_SECONDARY],
                 ),
             ),

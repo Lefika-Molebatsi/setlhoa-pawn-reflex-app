@@ -1,6 +1,7 @@
 import reflex as rx
 
 import copy
+import asyncio
 import re
 import unittest
 from datetime import date, timedelta
@@ -27,6 +28,10 @@ from app.states.dashboard_state import (
     _first_valid_mobile,
     DashboardState,
     EMPTY_EXTENSION,
+    _unique_headers,
+    _historical_row_eligible,
+    _verified_cycle_start,
+    EXTENSION_COLUMNS,
 )
 
 
@@ -672,6 +677,351 @@ class ExtensionDateTests(unittest.TestCase):
             self.assertEqual(queue[1]["maturity_date"], "2026-10-04")
             self.assertEqual(state.reminder_queue_count, 2)
             self.assertEqual(state.realized_interest, 300.0)
+
+    def historical_fixture(self):
+        raw = {
+            **self.raw,
+            "Pawn / Loan No.": "SC-09-03-01",
+            "Date": "2026-09-03",
+            "Status": "Extended",
+            "Maturity / Due Date": "2026-10-03",
+            "Day 23 Courtesy": "2026-09-26",
+            "Day 30 Due Action": "2026-10-03",
+            "Day 35 Final Warning": "2026-10-08",
+            "Day 23 Status": "Sent",
+            "Day 30 Status": "Sent",
+            "Day 35 Status": "Scheduled",
+            "Approved Loan Amount": "1500",
+            "Remaining Principal": "",
+            "Interest Amount": "450.00",
+            "Total Amount Due": "1950.00",
+            "Payment Amount": "",
+            "Payment Date": "",
+            "Payment Type": "",
+            "Extension ID": "",
+            "Extension Transaction": "",
+            "Date Settled": "",
+            "Liquidation Status": "",
+        }
+        sheet = FakeWorksheet(raw)
+        snapshot = dict(
+            zip(_unique_headers(sheet.row_values(1)), sheet.row_values(2))
+        )
+        expected = {
+            **EMPTY_RECORD,
+            "ticket": "SC-09-03-01",
+            "submission_id": "TEST-SUBMISSION",
+            "issue_date": "2026-09-03",
+            "loan_date": "2026-09-03",
+            "month": "2026-09",
+            "status": "Extended",
+            "due_date": "2026-10-03",
+            "principal": 1500.0,
+            "approved": 1500.0,
+            "remaining_principal": 1500.0,
+            "interest": 450.0,
+            "total_due": 1950.0,
+            "source_snapshot": snapshot,
+            "historical_extension_eligible": _historical_row_eligible(snapshot),
+        }
+        return sheet, expected
+
+    def historical_write(
+        self,
+        sheet,
+        expected,
+        payment_date="2026-10-03",
+        cash="450",
+        confirmed=True,
+    ):
+        return _write_ticket_extension(
+            sheet,
+            expected,
+            cash,
+            date(2026, 10, 10),
+            historical=True,
+            historical_date=payment_date,
+            confirmed=confirmed,
+        )
+
+    def historical_reload(self, sheet, expected):
+        headers = _unique_headers(sheet.row_values(1))
+        row = sheet.row_values(2)
+        raw = {
+            key: row[i] if i < len(row) else "" for i, key in enumerate(headers)
+        }
+        payments, message = _load_extension_payments(sheet.spreadsheet)
+        record = {
+            **expected,
+            "issue_date": _iso_or_raw(raw["Date"]),
+            "due_date": raw["Maturity / Due Date"],
+            "payment_date": raw.get("Payment Date", ""),
+            "status": raw["Status"],
+            "remaining_principal": float(
+                raw["Remaining Principal"] or raw["Approved Loan Amount"]
+            ),
+            "source_snapshot": raw,
+            "historical_extension_eligible": _historical_row_eligible(raw),
+            "extension_pending": bool(raw.get("Extension ID"))
+            and not any(
+                p["extension_id"] == raw["Extension ID"] for p in payments
+            ),
+        }
+        return record, payments, message
+
+    def test_historical_receipt_acceptance_milestones_reporting_and_queue(self):
+        sheet, expected = self.historical_fixture()
+        september = {
+            **EMPTY_RECORD,
+            "ticket": "SETTLED",
+            "status": "Settled",
+            "date_settled": "2026-09-29",
+            "settlement_realized_profit": 170.0,
+        }
+        other = {**self.expected, "ticket": "OTHER", "due_date": "2026-10-15"}
+        state = DashboardState(_reflex_internal_init=True)
+        state.records = [other, expected, september]
+        state.active_tab = "ledger"
+        state.selected_ticket = expected["ticket"]
+        state.payment_amount = "450"
+        state.historical_payment_date = "2026-10-03"
+        state.historical_cash_confirmed = True
+        with patch(
+            "app.states.dashboard_state._gaborone_date",
+            return_value=date(2026, 10, 10),
+        ):
+            self.assertTrue(state.historical_extension_eligible)
+            self.assertEqual(state.historical_extension_validation, "")
+            self.assertIn("Legacy", state.extension_validation)
+            self.assertEqual(state.realized_interest_reporting_month, "2026-09")
+            self.assertEqual(state.realized_interest, 170.0)
+            self.assertEqual(
+                [r["ticket"] for r in state.reminder_queue],
+                [expected["ticket"], "OTHER"],
+            )
+            self.assertEqual(
+                state.reminder_queue[0]["cycle_start"], "2026-09-03"
+            )
+            result = self.historical_write(sheet, expected)
+            record, payments, message = self.historical_reload(sheet, expected)
+            payload = {
+                "records": [other, record, september],
+                "extension_payments": payments,
+                "extension_ledger_message": message,
+                "months": ["2026-10", "2026-09"],
+                "worksheet": "Fake",
+                "calendar_health": "Fake",
+            }
+
+            async def consume():
+                async for _ in state.extend_ticket(True):
+                    pass
+
+            with (
+                patch(
+                    "app.states.dashboard_state._record_extension",
+                    return_value=result,
+                ) as write,
+                patch(
+                    "app.states.dashboard_state._read_live_records",
+                    return_value=payload,
+                ) as reload,
+            ):
+                asyncio.run(consume())
+                self.assertEqual(
+                    write.call_args.args[3:], (True, "2026-10-03", True)
+                )
+                reload.assert_called_once()
+            self.assertEqual(state.realized_interest_reporting_month, "2026-10")
+            self.assertEqual(state.realized_interest, 450.0)
+            self.assertEqual(state.last_confirmed_extension["cash"], 450.0)
+            self.assertIn("no new cash", state.success_message)
+            self.assertEqual(
+                [r["ticket"] for r in state.reminder_queue],
+                ["OTHER", expected["ticket"]],
+            )
+            self.assertEqual(
+                state.reminder_queue[1]["cycle_start"], "2026-10-03"
+            )
+            self.assertEqual(
+                state.reminder_queue[1]["issue_date"], "2026-09-03"
+            )
+            self.assertEqual(state.reminder_queue[1]["countdown_days"], 23)
+            state.selected_month = "2026-09"
+            self.assertEqual(state.realized_interest, 170.0)
+        raw = record["source_snapshot"]
+        for field, value in (
+            ("Date", "2026-09-03"),
+            ("Maturity / Due Date", "2026-11-02"),
+            ("Day 23 Courtesy", "2026-10-26"),
+            ("Day 30 Due Action", "2026-11-02"),
+            ("Day 35 Final Warning", "2026-11-07"),
+            ("Payment Date", "2026-10-03"),
+            ("Approved Loan Amount", "1500"),
+            ("Remaining Principal", "1500.00"),
+            ("Day 23 Status", ""),
+            ("Day 30 Status", ""),
+            ("Day 35 Status", ""),
+        ):
+            self.assertEqual(raw[field], value)
+        self.assertTrue(
+            result["primary_verified"] and result["ledger_verified"]
+        )
+        self.assertEqual(payments[0]["interest"], 450.0)
+        self.assertEqual(payments[0]["cash"], 450.0)
+        self.assertEqual(payments[0]["excess"], 0.0)
+        self.assertEqual(record["month"], "2026-09")
+        self.assertEqual(
+            _confirmed_extension_match(result, payments, [record]), payments[0]
+        )
+
+    def test_historical_dates_confirmation_and_actual_cash_required(self):
+        for value, confirmed in (
+            ("", True),
+            ("10/03/2026", True),
+            ("2026-02-30", True),
+            ("2026-10-11", True),
+            ("2026-09-02", True),
+            ("2026-10-03", False),
+        ):
+            with self.subTest(value=value, confirmed=confirmed):
+                sheet, expected = self.historical_fixture()
+                with self.assertRaises(ValueError):
+                    self.historical_write(
+                        sheet, expected, value, confirmed=confirmed
+                    )
+                self.assertEqual(sheet.batches, 0)
+                self.assertEqual(sheet.spreadsheet.creations, 0)
+        for cash in ("", "0", "449.99", "NaN", "450.001"):
+            sheet, expected = self.historical_fixture()
+            with self.subTest(cash=cash), self.assertRaises(ValueError):
+                self.historical_write(sheet, expected, cash=cash)
+            self.assertEqual(sheet.batches, 0)
+        for value, due in (
+            ("2026-09-03", "2026-11-02"),
+            ("2026-10-10", "2026-11-09"),
+        ):
+            sheet, expected = self.historical_fixture()
+            result = self.historical_write(sheet, expected, value)
+            self.assertEqual(result["payment"]["new_due"], due)
+            self.assertEqual(result["payment"]["payment_date"], value)
+
+    def test_historical_repeat_reconciliation_and_conflicting_retry(self):
+        sheet, expected = self.historical_fixture()
+        first = self.historical_write(sheet, expected)
+        replay = self.historical_write(sheet, expected)
+        self.assertEqual(first["payment"], replay["payment"])
+        self.assertEqual(sheet.batches, 1)
+        self.assertEqual(sheet.spreadsheet.ledger.append_count, 1)
+        for value, cash in (("2026-10-04", "450"), ("2026-10-03", "451")):
+            with self.assertRaises(ValueError):
+                self.historical_write(sheet, expected, value, cash)
+        record, _, _ = self.historical_reload(sheet, expected)
+        with self.assertRaises(ValueError):
+            self.historical_write(sheet, record)
+        next_result = _write_ticket_extension(
+            sheet, record, "450", date(2026, 10, 10)
+        )
+        self.assertEqual(next_result["payment"]["new_due"], "2026-12-02")
+        self.assertEqual(next_result["payment"]["payment_date"], "2026-10-10")
+        self.assertEqual(sheet.spreadsheet.ledger.append_count, 2)
+        for lost_response in (False, True):
+            sheet, expected = self.historical_fixture()
+            ledger = sheet.spreadsheet.add_worksheet(
+                "Extension Payments", 1000, 13
+            )
+            ledger.fail_before_append = not lost_response
+            ledger.fail_after_append = lost_response
+            with self.assertRaises(RuntimeError):
+                self.historical_write(sheet, expected)
+            ledger.fail_before_append = ledger.fail_after_append = False
+            repaired = _write_ticket_extension(
+                sheet, expected, "", date(2026, 10, 10), repair=True
+            )
+            self.assertEqual(repaired["payment"]["payment_date"], "2026-10-03")
+            self.assertEqual(sheet.batches, 1)
+            self.assertEqual(ledger.append_count, 1)
+
+    def test_historical_receipts_status_snapshot_and_duplicate_guards(self):
+        for key, value in (
+            ("Status", "Active"),
+            ("Status", "Settled"),
+            ("Status", "Defaulted"),
+            ("Liquidation Status", "Sold"),
+            ("Date Settled", "2026-10-03"),
+            ("Payment Amount", "0"),
+            ("Payment Amount", "450"),
+            ("Payment Date", "invalid"),
+            ("Payment Type", "Interest Extension"),
+            ("Extension ID", "false-id"),
+            ("Extension Transaction", "{}"),
+            ("Interest Amount", "451"),
+            ("Date", "2026-09-04"),
+            ("Day 23 Status", "Changed"),
+        ):
+            with self.subTest(key=key, value=value):
+                sheet, expected = self.historical_fixture()
+                sheet.values[1][sheet.values[0].index(key)] = value
+                with self.assertRaises(ValueError):
+                    self.historical_write(sheet, expected)
+                self.assertEqual(sheet.batches, 0)
+                self.assertEqual(sheet.spreadsheet.creations, 0)
+        sheet, expected = self.historical_fixture()
+        with self.assertRaises(ValueError):
+            _write_ticket_extension(sheet, expected, "450", date(2026, 10, 10))
+        self.assertEqual(sheet.batches, 0)
+        for status in ("Verified", "Pending", "Invalid"):
+            sheet, expected = self.historical_fixture()
+            ledger = sheet.spreadsheet.add_worksheet(
+                "Extension Payments", 1000, 13
+            )
+            row = {key: "" for key in EXTENSION_COLUMNS}
+            row.update(
+                {
+                    "Extension ID": "different-submission-or-false",
+                    "Ticket": expected["ticket"],
+                    "Old Due": "2026-10-03",
+                    "Status": status,
+                }
+            )
+            ledger.values = [
+                list(EXTENSION_COLUMNS),
+                [row[key] for key in EXTENSION_COLUMNS],
+            ]
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                self.historical_write(sheet, expected)
+            self.assertEqual(sheet.batches, 0)
+            self.assertEqual(ledger.append_count, 0)
+        sheet, expected = self.historical_fixture()
+        sheet.change_before_write = True
+        with self.assertRaises(ValueError):
+            self.historical_write(sheet, expected)
+        self.assertEqual(sheet.batches, 0)
+
+    def test_historical_failed_verification_never_counts_or_confirms(self):
+        sheet, expected = self.historical_fixture()
+        sheet.corrupt = True
+        with self.assertRaises(RuntimeError):
+            self.historical_write(sheet, expected)
+        payments, _ = _load_extension_payments(sheet.spreadsheet)
+        self.assertEqual(payments, [])
+        self.assertEqual(
+            _monthly_realized_interest([expected], payments, "2026-10"), 0.0
+        )
+        self.assertEqual(_verified_cycle_start(expected, payments), "")
+        sheet, expected = self.historical_fixture()
+        result = self.historical_write(sheet, expected)
+        record, payments, _ = self.historical_reload(sheet, expected)
+        for invalid in (
+            [{**payments[0], "status": "Pending"}],
+            [{**payments[0], "new_due": "2026-11-03"}],
+            [payments[0], {**payments[0], "cash": 451.0}],
+        ):
+            self.assertEqual(_verified_cycle_start(record, invalid), "")
+        with self.assertRaises(ValueError):
+            _confirmed_extension_match(
+                {**result, "ledger_verified": False}, payments, [record]
+            )
 
     def test_unverified_write_and_prewrite_conflict(self):
         sheet = FakeWorksheet(self.raw)
