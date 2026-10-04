@@ -71,6 +71,8 @@ class FakeWorksheet:
 
 
 class FakePaymentWorksheet:
+    title = "Extension Payments"
+
     def __init__(self):
         self.values = []
         self.fail_after_append = False
@@ -99,6 +101,9 @@ class FakeSpreadsheet:
     def __init__(self):
         self.ledger = None
         self.creations = 0
+
+    def worksheets(self) -> list[FakePaymentWorksheet]:
+        return [] if self.ledger is None else [self.ledger]
 
     def worksheet(self, title):
         import gspread

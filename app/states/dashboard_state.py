@@ -2624,12 +2624,15 @@ def _verify_extension_primary(
 
 
 def _extension_ledger_rows(spreadsheet) -> tuple[object, list[dict[str, str]]]:
-    import gspread
-
-    try:
-        ledger = spreadsheet.worksheet("Extension Payments")
-    except gspread.WorksheetNotFound:
-        logging.exception("Unexpected error")
+    ledger = next(
+        (
+            ws
+            for ws in spreadsheet.worksheets()
+            if ws.title == "Extension Payments"
+        ),
+        None,
+    )
+    if ledger is None:
         return None, []
     values = ledger.get_all_values()
     if not values:
