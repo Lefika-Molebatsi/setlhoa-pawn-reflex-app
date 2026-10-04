@@ -544,6 +544,7 @@ class ExtensionDateTests(unittest.TestCase):
         }
         state = DashboardState(_reflex_internal_init=True)
         state.extension_payments = []
+        state.selected_month = "ALL"
         state.records = [september, {**self.expected, "month": "2026-10"}]
         with patch(
             "app.states.dashboard_state._gaborone_date", return_value=today
