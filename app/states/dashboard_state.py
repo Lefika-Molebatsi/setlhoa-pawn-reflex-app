@@ -38,6 +38,7 @@ class LoanRecord(TypedDict):
     settlement_late_fees: float
     retained_overpayment: float
     settlement_realized_profit: float
+    settlement_profit_available: bool
     settlement_required_total: float
     date_settled: str
     remarks: str
@@ -102,6 +103,7 @@ EMPTY_RECORD: LoanRecord = {
     "settlement_late_fees": 0.0,
     "retained_overpayment": 0.0,
     "settlement_realized_profit": 0.0,
+    "settlement_profit_available": False,
     "settlement_required_total": 0.0,
     "date_settled": "",
     "remarks": "",
@@ -1365,15 +1367,21 @@ class DashboardState(rx.State):
             and not _is_sold(record["liquidation_status"])
         )
 
+    @rx.var(cache=False)
+    def realized_interest_reporting_month(self) -> str:
+        return _realized_interest_reporting_month(
+            self.records,
+            self.extension_payments,
+            self.selected_month,
+            _gaborone_date(),
+        )
+
     @rx.var
     def realized_interest(self) -> float:
-        month = (
-            self.selected_month
-            if self.selected_month != "ALL"
-            else _gaborone_date().strftime("%Y-%m")
-        )
         return _monthly_realized_interest(
-            self.records, self.extension_payments, month
+            self.records,
+            self.extension_payments,
+            self.realized_interest_reporting_month,
         )
 
     @rx.var
@@ -1590,24 +1598,21 @@ def _settlement_accounting(
     raw: dict[str, str], status: str, interest: float
 ) -> dict[str, float]:
     sold = _is_sold(raw.get("Liquidation Status", ""))
-    explicit = raw.get("Payment Type", "").strip().casefold() == "settlement"
     settled_loan = status == "Settled" and not sold
-    detail_columns = (
-        "Settlement Principal",
-        "Settlement Interest",
-        "Settlement Late Fees",
-        "Retained Overpayment",
-        "Settlement Realized Profit",
-        "Settlement Required Total",
-    )
-    has_detail = any(str(raw.get(name, "")).strip() for name in detail_columns)
     principal = (
         _sheet_cents(raw.get("Settlement Principal", ""))
         if settled_loan
         else 0.0
     )
+    saved_interest = _money_value(raw.get("Settlement Interest", ""))
     earned_interest = (
-        _sheet_cents(raw.get("Settlement Interest", ""))
+        (
+            _sheet_cents(saved_interest)
+            if saved_interest is not None
+            and math.isfinite(saved_interest)
+            and saved_interest >= 0
+            else _sheet_cents(interest)
+        )
         if settled_loan
         else 0.0
     )
@@ -1621,28 +1626,18 @@ def _settlement_accounting(
         if settled_loan
         else 0.0
     )
-    saved_profit = (
-        _sheet_cents(raw.get("Settlement Realized Profit", ""))
+    saved_profit = _money_value(raw.get("Settlement Realized Profit", ""))
+    profit = (
+        (
+            _sheet_cents(saved_profit)
+            if saved_profit is not None
+            and math.isfinite(saved_profit)
+            and saved_profit >= 0
+            else _sum_cents((earned_interest, fees, retained))
+        )
         if settled_loan
         else 0.0
     )
-    profit = (
-        _sum_cents((earned_interest, fees, retained))
-        if settled_loan and explicit and has_detail
-        else (
-            _sheet_cents(interest) if settled_loan and not has_detail else 0.0
-        )
-    )
-    if (
-        settled_loan
-        and explicit
-        and has_detail
-        and raw.get("Settlement Realized Profit", "").strip()
-        and saved_profit != profit
-    ):
-        logging.warning(
-            "Settlement realized profit differs from persisted components; using component sum"
-        )
     return {
         "cash_tendered": _sheet_cents(
             _first(raw, ["Payment Amount", "Final Payout (BWP)"])
@@ -2255,6 +2250,7 @@ def _read_live_records() -> dict[str, object]:
                     "settlement_required_total": accounting[
                         "settlement_required_total"
                     ],
+                    "settlement_profit_available": True,
                     "date_settled": _display_text(date_settled),
                     "remarks": _display_text(
                         _first(
@@ -2459,7 +2455,7 @@ def _extension_updates(
             "The live status, due date or amounts changed. Refresh and review before extending."
         )
     tender = _extension_cash(cash, interest)
-    new_due = due + timedelta(days=30)
+    new_due = max(today, due) + timedelta(days=30)
     next_interest = _settlement_money(remaining * interest / principal)
     return {
         "Status": "Extended",
@@ -2745,9 +2741,14 @@ def _validated_extension_entry(raw: dict[str, str]) -> ExtensionPayment:
         != amounts["Interest Realized"] + amounts["Unapplied Excess"]
     ):
         raise ValueError("Extension ledger cash allocation is inconsistent.")
-    if date.fromisoformat(raw["New Due"]) != date.fromisoformat(
-        raw["Old Due"]
-    ) + timedelta(days=30):
+    old_due = date.fromisoformat(raw["Old Due"])
+    payment_date = date.fromisoformat(raw["Payment Date"])
+    new_due = date.fromisoformat(raw["New Due"])
+    # Retain historical old-due-based transitions alongside the current policy.
+    if new_due not in (
+        max(payment_date, old_due) + timedelta(days=30),
+        old_due + timedelta(days=30),
+    ):
         raise ValueError("Extension ledger due transition is inconsistent.")
     return ExtensionPayment(
         extension_id=raw["Extension ID"],
@@ -2935,11 +2936,51 @@ def _append_extension_payment(spreadsheet, journal: dict[str, str]) -> None:
         )
 
 
+def _record_settlement_profit(record: LoanRecord) -> float:
+    saved = record.get("settlement_realized_profit")
+    if saved is not None and math.isfinite(saved) and saved >= 0:
+        if saved > 0 or record.get("settlement_profit_available", False):
+            return _sheet_cents(saved)
+    interest = record.get("settlement_interest", 0.0)
+    if not math.isfinite(interest) or interest <= 0:
+        interest = record.get("interest", 0.0)
+    return _sum_cents(
+        (
+            _sheet_cents(interest),
+            _sheet_cents(record.get("settlement_late_fees", 0.0)),
+            _sheet_cents(record.get("retained_overpayment", 0.0)),
+        )
+    )
+
+
+def _realized_interest_reporting_month(
+    records: list[LoanRecord],
+    payments: list[ExtensionPayment],
+    selected_month: str,
+    today: date,
+) -> str:
+    if selected_month != "ALL":
+        return selected_month
+    current = today.strftime("%Y-%m")
+    if _monthly_realized_interest(records, payments, current) > 0:
+        return current
+    candidates = {
+        _date_month(r["date_settled"])
+        for r in records
+        if r["status"] == "Settled" and not _is_sold(r["liquidation_status"])
+    } | {_date_month(p["payment_date"]) for p in payments}
+    for month in sorted(candidates, reverse=True):
+        if month and month < current:
+            if _monthly_realized_interest(records, payments, month) > 0:
+                return month
+    return current
+
+
 def _monthly_realized_interest(
     records: list[LoanRecord], payments: list[ExtensionPayment], month: str
 ) -> float:
     settlement = [
-        Decimal(r["settlement_realized_profit"])
+        Decimal(_record_settlement_profit(r))
         for r in records
         if r["status"] == "Settled"
         and not _is_sold(r["liquidation_status"])

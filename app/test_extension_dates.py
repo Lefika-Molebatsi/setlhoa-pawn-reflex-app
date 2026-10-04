@@ -18,6 +18,10 @@ from app.states.dashboard_state import (
     _write_ticket_extension,
     _load_extension_payments,
     _monthly_realized_interest,
+    _settlement_accounting,
+    _realized_interest_reporting_month,
+    _date_month,
+    _primary_date_updates,
     _confirmed_extension_match,
     _extension_confirmation_text,
     _first_valid_mobile,
@@ -157,12 +161,14 @@ class ExtensionDateTests(unittest.TestCase):
             _resolved_due_date("09/04/2026", self.today), self.today
         )
         self.assertEqual(_date_value("2026-09-03"), date(2026, 9, 3))
-        self.assertIsNone(_date_value("09/04/2026"))
-        self.assertEqual(_iso_or_raw("09/04/2026"), "09/04/2026")
+        self.assertEqual(_date_value("09/04/2026"), date(2026, 9, 4))
+        self.assertEqual(_iso_or_raw("09/04/2026"), "2026-09-04")
         self.raw.update(
             Status="Extended", **{"Payment Type": "Interest-only Extension"}
         )
-        self.assertIsNone(_record_due_date(self.raw, date(2026, 9, 3)))
+        self.assertEqual(
+            _record_due_date(self.raw, date(2026, 9, 3)), date(2026, 9, 4)
+        )
         self.raw["Maturity / Due Date"] = "2026-09-03"
         self.assertEqual(
             _record_due_date(self.raw, self.today), date(2026, 9, 3)
@@ -407,6 +413,265 @@ class ExtensionDateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _write_ticket_extension(sheet, self.expected, "300.00", self.today)
         self.assertEqual(len(ledger.values), 3)
+
+    def test_settlement_saved_profit_and_partial_legacy_detail(self):
+        cases = (
+            (
+                {
+                    "Settlement Realized Profit": "170",
+                    "Settlement Interest": "144",
+                    "Retained Overpayment": "26",
+                },
+                170.0,
+            ),
+            ({"Settlement Realized Profit": "170"}, 170.0),
+            (
+                {
+                    "Settlement Realized Profit": "0",
+                    "Settlement Interest": "144",
+                },
+                0.0,
+            ),
+            (
+                {
+                    "Settlement Realized Profit": "-1",
+                    "Settlement Interest": "144",
+                    "Retained Overpayment": "26",
+                },
+                170.0,
+            ),
+            (
+                {"Settlement Interest": "144", "Retained Overpayment": "26"},
+                170.0,
+            ),
+            ({"Settlement Interest": "144"}, 144.0),
+            ({"Settlement Principal": "1000"}, 624.0),
+            ({"Settlement Late Fees": "10"}, 634.0),
+            ({}, 624.0),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                raw = {
+                    "Payment Amount": "2000",
+                    "Extension Excess": "500",
+                    **details,
+                }
+                accounting = _settlement_accounting(raw, "Settled", 624.0)
+                self.assertEqual(
+                    accounting["settlement_realized_profit"], expected
+                )
+                record = {
+                    **EMPTY_RECORD,
+                    **accounting,
+                    "status": "Settled",
+                    "date_settled": "2026-09-29",
+                    "interest": 624.0,
+                    "settlement_profit_available": True,
+                }
+                self.assertEqual(
+                    _monthly_realized_interest([record], [], "2026-09"),
+                    expected,
+                )
+                self.assertEqual(
+                    _monthly_realized_interest([record], [], "2026-10"), 0.0
+                )
+                for status, liquidation in (
+                    ("Active", ""),
+                    ("Settled", "Sold"),
+                ):
+                    excluded = _settlement_accounting(
+                        {**raw, "Liquidation Status": liquidation},
+                        status,
+                        624.0,
+                    )
+                    self.assertEqual(
+                        excluded["settlement_realized_profit"], 0.0
+                    )
+        legacy = {
+            **EMPTY_RECORD,
+            "status": "Settled",
+            "date_settled": "2026-09-29",
+            "interest": 624.0,
+            "settlement_interest": 144.0,
+            "retained_overpayment": 26.0,
+        }
+        self.assertEqual(
+            _monthly_realized_interest([legacy], [], "2026-09"), 170.0
+        )
+        legacy["settlement_interest"] = 0.0
+        legacy["retained_overpayment"] = 0.0
+        self.assertEqual(
+            _monthly_realized_interest([legacy], [], "2026-09"), 624.0
+        )
+
+    def test_settlement_date_normalization_and_month_matching(self):
+        for text, iso in (
+            ("2026-09-29", "2026-09-29"),
+            ("29/09/2026", "2026-09-29"),
+            ("09/29/2026", "2026-09-29"),
+            ("29-09-2026", "2026-09-29"),
+            ("09/10/2026", "2026-09-10"),
+            ("09-10-2026", "2026-09-10"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(_iso_or_raw(text), iso)
+                self.assertEqual(_date_month(text), "2026-09")
+                record = {
+                    **EMPTY_RECORD,
+                    "status": "Settled",
+                    "date_settled": text,
+                    "settlement_realized_profit": 170.0,
+                }
+                self.assertEqual(
+                    _monthly_realized_interest([record], [], "2026-09"), 170.0
+                )
+        self.assertIsNone(_date_value("02/30/2026"))
+        self.assertIsNone(_date_value("2026-09-29Tinvalid"))
+
+    def test_reporting_month_fallback_current_and_explicit_lenses(self):
+        today = date(2026, 10, 1)
+        september = {
+            **EMPTY_RECORD,
+            "status": "Settled",
+            "date_settled": "2026-09-29",
+            "settlement_realized_profit": 170.0,
+            "month": "2026-08",
+        }
+        state = DashboardState(_reflex_internal_init=True)
+        state.extension_payments = []
+        state.records = [september, {**self.expected, "month": "2026-10"}]
+        with patch(
+            "app.states.dashboard_state._gaborone_date", return_value=today
+        ):
+            self.assertEqual(state.realized_interest_reporting_month, "2026-09")
+            self.assertEqual(state.realized_interest, 170.0)
+            self.assertEqual(state.selected_month, "ALL")
+            self.assertEqual(len(state.visible_records), 2)
+            self.assertEqual(state.deployed_capital, 800.0)
+            state.selected_month = "2026-10"
+            self.assertEqual(state.realized_interest_reporting_month, "2026-10")
+            self.assertEqual(state.realized_interest, 0.0)
+            self.assertEqual(len(state.visible_records), 1)
+            state.selected_month = "2026-08"
+            self.assertEqual(state.realized_interest_reporting_month, "2026-08")
+            self.assertEqual(state.realized_interest, 0.0)
+        payment = {
+            **EMPTY_EXTENSION,
+            "extension_id": "TEST-REPORT",
+            "status": "Verified",
+            "payment_date": "2026-10-01",
+            "interest": 300.0,
+            "cash": 400.0,
+            "excess": 100.0,
+        }
+        self.assertEqual(
+            _realized_interest_reporting_month(
+                [september], [payment], "ALL", today
+            ),
+            "2026-10",
+        )
+        self.assertEqual(
+            _monthly_realized_interest(
+                [september], [payment, payment.copy()], "2026-10"
+            ),
+            300.0,
+        )
+        self.assertEqual(
+            _realized_interest_reporting_month(
+                [september], [{**payment, "status": "Pending"}], "ALL", today
+            ),
+            "2026-09",
+        )
+        conflict = {**payment, "cash": 500.0}
+        self.assertEqual(
+            _realized_interest_reporting_month(
+                [september], [payment, conflict], "ALL", today
+            ),
+            "2026-09",
+        )
+        self.assertEqual(
+            _realized_interest_reporting_month([], [], "ALL", today), "2026-10"
+        )
+        self.assertEqual(
+            _realized_interest_reporting_month(
+                [], [payment], "ALL", date(2026, 11, 1)
+            ),
+            "2026-10",
+        )
+        self.assertEqual(
+            _realized_interest_reporting_month(
+                [], [payment], "ALL", date(2026, 9, 1)
+            ),
+            "2026-09",
+        )
+
+    def test_october_future_and_overdue_verified_iso_milestones(self):
+        for today, expected_due in (
+            (date(2026, 10, 1), date(2026, 11, 2)),
+            (date(2026, 10, 3), date(2026, 11, 2)),
+            (date(2026, 10, 10), date(2026, 11, 9)),
+        ):
+            with self.subTest(today=today):
+                raw = {**self.raw, "Maturity / Due Date": "2026-10-03"}
+                expected = {**self.expected, "due_date": "2026-10-03"}
+                sheet = FakeWorksheet(raw)
+                result = _write_ticket_extension(
+                    sheet, expected, "300.00", today
+                )
+                saved = dict(zip(sheet.row_values(1), sheet.row_values(2)))
+                self.assertTrue(
+                    result["primary_verified"] and result["ledger_verified"]
+                )
+                for field, offset in (
+                    ("Maturity / Due Date", 0),
+                    ("Day 23 Courtesy", -7),
+                    ("Day 30 Due Action", 0),
+                    ("Day 35 Final Warning", 5),
+                ):
+                    self.assertEqual(
+                        saved[field],
+                        (expected_due + timedelta(days=offset)).isoformat(),
+                    )
+                before = sheet.get_all_values()
+                _primary_date_updates(saved)
+                self.assertEqual(
+                    _record_due_date(saved, self.today), expected_due
+                )
+                self.assertEqual(sheet.get_all_values(), before)
+                self.assertEqual(sheet.batches, 1)
+
+    def test_reminder_queue_reorders_from_reloaded_records(self):
+        state = DashboardState(_reflex_internal_init=True)
+        overdue = {**self.expected, "due_date": "2026-09-01"}
+        other = {**self.expected, "ticket": "TEST-2", "due_date": "2026-09-11"}
+        state.records = [other, overdue]
+        with patch(
+            "app.states.dashboard_state._gaborone_date", return_value=self.today
+        ):
+            self.assertEqual(
+                [r["ticket"] for r in state.reminder_queue],
+                ["TEST-1", "TEST-2"],
+            )
+            sheet = FakeWorksheet(
+                {**self.raw, "Maturity / Due Date": overdue["due_date"]}
+            )
+            _write_ticket_extension(sheet, overdue, "300.00", self.today)
+            payments, _ = _load_extension_payments(sheet.spreadsheet)
+            state.records = [
+                other,
+                {
+                    **overdue,
+                    "status": "Extended",
+                    "due_date": payments[0]["new_due"],
+                },
+            ]
+            state.extension_payments = payments
+            queue = state.reminder_queue
+            self.assertEqual([r["ticket"] for r in queue], ["TEST-2", "TEST-1"])
+            self.assertEqual(queue[1]["countdown_days"], 30)
+            self.assertEqual(queue[1]["maturity_date"], "2026-10-04")
+            self.assertEqual(state.reminder_queue_count, 2)
+            self.assertEqual(state.realized_interest, 300.0)
 
     def test_unverified_write_and_prewrite_conflict(self):
         sheet = FakeWorksheet(self.raw)

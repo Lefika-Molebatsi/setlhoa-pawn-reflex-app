@@ -304,9 +304,9 @@ def dashboard_panel() -> rx.Component:
                 "banknote",
             ),
             metric_card(
-                "Monthly realized interest",
+                f"Monthly realized interest · {DashboardState.realized_interest_reporting_month}",
                 DashboardState.realized_interest,
-                "Earned-month basis: verified extension interest by payment date, plus settled-loan profit by settlement date. All live months uses the current Botswana month. Excludes extension excess and inventory sales.",
+                "Earned in the reporting month shown: verified extension interest by payment date plus settled-loan profit by settlement date. All live months prefers the current Botswana month, otherwise the latest previous earnings month. Excludes principal, extension excess and inventory sales; other cards retain the month lens.",
                 "trending-up",
             ),
             metric_card(

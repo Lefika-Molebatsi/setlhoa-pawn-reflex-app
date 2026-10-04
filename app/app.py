@@ -102,4 +102,4 @@ app = rx.App(
         ),
     ],
 )
-app.add_page(index, route="/")
+app.add_page(index, route="/", on_load=DashboardState.refresh_sheets)
