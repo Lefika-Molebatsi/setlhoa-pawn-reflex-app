@@ -1,3 +1,5 @@
+import reflex as rx
+
 import asyncio
 import hashlib
 import json
@@ -10,8 +12,6 @@ from datetime import date, datetime, timedelta
 from typing import Iterable, TypedDict
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
-
-import reflex as rx
 
 
 class LoanRecord(TypedDict):
@@ -1130,8 +1130,6 @@ class DashboardState(rx.State):
             self.selected_ticket = ""
             try:
                 payload = await asyncio.to_thread(_read_live_records)
-                self._keep_extension_confirmation(result, payload)
-                self.success_message = result["message"]
                 self.records = payload["records"]
                 self.extension_payments = payload["extension_payments"]
                 self.extension_ledger_message = payload[
@@ -1144,6 +1142,8 @@ class DashboardState(rx.State):
                 )
                 self.calendar_health = payload["calendar_health"]
                 self.last_refresh = _gaborone_now()
+                self._keep_extension_confirmation(result, payload)
+                self.success_message = result["message"]
             except Exception as e:
                 logging.exception(f"Error: {e}")
                 self._clear_extension_confirmation()
@@ -1239,6 +1239,10 @@ class DashboardState(rx.State):
             try:
                 payload = await asyncio.to_thread(_read_live_records)
                 self.records = payload["records"]
+                self.extension_payments = payload["extension_payments"]
+                self.extension_ledger_message = payload[
+                    "extension_ledger_message"
+                ]
                 self.months = payload["months"]
                 self.worksheet_name = payload["worksheet"]
                 self.sheets_health = (
@@ -1380,7 +1384,7 @@ class DashboardState(rx.State):
             for p in self.extension_payments
             if (
                 self.selected_month == "ALL"
-                or p["payment_date"][:7] == self.selected_month
+                or _date_month(p["payment_date"]) == self.selected_month
             )
             and (not query or query in p["ticket"].casefold())
         ]
@@ -1413,15 +1417,19 @@ class DashboardState(rx.State):
                 _record_extension, self.selected_record.copy(), "", True
             )
             payload = await asyncio.to_thread(_read_live_records)
-            self._keep_extension_confirmation(result, payload)
             self.records = payload["records"]
             self.extension_payments = payload["extension_payments"]
             self.extension_ledger_message = payload["extension_ledger_message"]
             self.months = payload["months"]
+            self.worksheet_name = payload["worksheet"]
+            self.sheets_health = f"Connected · {len(self.records)} live records"
+            self.calendar_health = payload["calendar_health"]
             self.last_refresh = _gaborone_now()
+            self._keep_extension_confirmation(result, payload)
             self.success_message = result["message"]
         except Exception as e:
             logging.exception(f"Error: {e}")
+            self._clear_extension_confirmation()
             self.extension_error = "Reconciliation could not be verified. Keep the saved transaction intact and retry reconciliation; do not collect another payment."
         finally:
             self.operation_loading = False
@@ -1535,8 +1543,8 @@ def _normalize_mobile(value: str) -> str:
     text = str(value or "").strip()
     if text.endswith(".0"):
         text = text[:-2]
-    compact = re.sub(r"[\s()\-]", "", text)
-    for prefix in ("+267", "00267", "267"):
+    compact = re.sub(r"[^0-9]", "", text)
+    for prefix in ("00267", "267"):
         if compact.startswith(prefix):
             compact = compact[len(prefix) :]
             break
@@ -1670,27 +1678,35 @@ def _money_value(value: str) -> float | None:
 
 
 def _parse_business_date(value: str) -> date | None:
-    """ISO first; never guess the order of an ambiguous legacy numeric date."""
+    """Jotform month-first for ambiguity; day-first only when first > 12.
+
+    Invalid month-first dates are never retried in another order. Legacy
+    timestamps must validate in full before their calendar date is used.
+    """
     text = str(value or "").strip()
-    candidate = text.replace("T", " ").split(" ", 1)[0]
+    candidate = text
+    if re.match(r"^\d{4}-\d{2}-\d{2}[T ]", text):
+        try:
+            return datetime.fromisoformat(text).date()
+        except ValueError:
+            return None
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
         try:
             return date.fromisoformat(candidate)
         except ValueError:
             return None
-    match = re.fullmatch(r"(\d{2})[/-](\d{2})[/-](\d{4})", candidate)
+    match = re.fullmatch(r"(\d{1,2})([/-])(\d{1,2})\2(\d{4})", candidate)
     if match:
-        first, second, year = map(int, match.groups())
+        first, _, second, year = match.groups()
+        first, second, year = int(first), int(second), int(year)
         try:
-            if first == second:
-                return date(year, first, second)
-            if first > 12:
-                return date(year, second, first)
-            if second > 12:
-                return date(year, first, second)
+            return (
+                date(year, second, first)
+                if first > 12
+                else date(year, first, second)
+            )
         except ValueError:
             return None
-        return None
     for fmt in ("%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y"):
         try:
             return datetime.strptime(text, fmt).date()
@@ -1701,13 +1717,14 @@ def _parse_business_date(value: str) -> date | None:
 
 def _parse_jotform_source_date(value: str) -> date | None:
     """Known source uses MM-DD-YYYY / MM/DD/YYYY; ISO is always year-first."""
-    candidate = str(value or "").strip().replace("T", " ").split(" ", 1)[0]
+    candidate = str(value or "").strip()
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
         return _parse_business_date(candidate)
-    match = re.fullmatch(r"(\d{2})[/-](\d{2})[/-](\d{4})", candidate)
+    match = re.fullmatch(r"(\d{1,2})([/-])(\d{1,2})\2(\d{4})", candidate)
     if not match:
         return None
-    month, day, year = map(int, match.groups())
+    month, _, day, year = match.groups()
+    month, day, year = int(month), int(day), int(year)
     try:
         return date(year, month, day)
     except ValueError:
@@ -1734,9 +1751,9 @@ def _iso_or_raw(value: str) -> str:
 def _resolved_due_date(
     explicit: str, issue_date: date | None, source: str = "jotform"
 ) -> date | None:
-    """Source dates are month-first; normalized records never guess legacy order."""
+    """An explicit invalid due date must not fall back to issue plus 30."""
     if str(explicit or "").strip():
-        return _date_value(explicit, source)
+        return _date_value(explicit)
     return issue_date + timedelta(days=30) if issue_date else None
 
 
@@ -1744,15 +1761,7 @@ def _record_due_date(raw: dict[str, str], issue: date | None) -> date | None:
     explicit = raw.get("Maturity / Due Date", "").strip()
     if not explicit:
         return _resolved_due_date("", issue)
-    legacy_extension = "extension" in raw.get(
-        "Payment Type", ""
-    ).casefold() or (
-        _first(raw, ["Status", "Loan Status"]).casefold() == "extended"
-        and bool(raw.get("Last Updated", "").strip())
-    )
-    return _date_value(
-        explicit, "normalized" if legacy_extension else "jotform"
-    )
+    return _date_value(explicit)
 
 
 def _days_to_due(due_date: date | None, today: date) -> int | None:
@@ -1777,13 +1786,8 @@ def _authoritative_date(
     raw: dict[str, str], source: str, aliases: list[str]
 ) -> date | None:
     primary = str(raw.get(source, "") or "").strip()
-    parsed = (
-        _parse_jotform_source_date(primary)
-        if source == "Date"
-        else _date_value(primary)
-    )
-    if parsed:
-        return parsed
+    if primary:
+        return _date_value(primary)
     return _date_value(_first(raw, aliases))
 
 
@@ -1844,6 +1848,164 @@ def _unique_headers(headers: list[str]) -> list[str]:
     return result
 
 
+PRIMARY_MILESTONE_COLUMNS: tuple[str, ...] = (
+    "Maturity / Due Date",
+    "Day 23 Courtesy",
+    "Day 30 Due Action",
+    "Day 35 Final Warning",
+)
+
+ISSUE_DATE_COLUMNS: tuple[str, ...] = (
+    "Date",
+    "Submission Date",
+    "Created At",
+    "Created at",
+    "Date Created",
+    "Timestamp",
+    "Issue Date",
+    "Loan Date",
+)
+
+
+def _primary_date_updates(raw: dict[str, str]) -> dict[str, str]:
+    """Pure migration plan: preserve invalid dates and all non-date values."""
+    updates: dict[str, str] = {}
+    date_columns = (
+        *ISSUE_DATE_COLUMNS,
+        "Payment Date",
+        "Date Settled",
+        "Settlement Date",
+        "Sale Date",
+        *PRIMARY_MILESTONE_COLUMNS,
+    )
+    for name in date_columns:
+        value = raw.get(name, "")
+        parsed = _date_value(value)
+        if parsed is not None and parsed.isoformat() != value:
+            updates[name] = parsed.isoformat()
+    issue = _authoritative_date(raw, "Date", list(ISSUE_DATE_COLUMNS[1:]))
+    due = _record_due_date(raw, issue)
+    if due is not None:
+        milestones = {
+            "Maturity / Due Date": due.isoformat(),
+            "Day 23 Courtesy": (due - timedelta(days=7)).isoformat(),
+            "Day 30 Due Action": due.isoformat(),
+            "Day 35 Final Warning": (due + timedelta(days=5)).isoformat(),
+        }
+        for name, value in milestones.items():
+            if raw.get(name, "") != value:
+                updates[name] = value
+    return updates
+
+
+def _same_sheet_snapshot(left: list[list[str]], right: list[list[str]]) -> bool:
+    """Compare physical cells, tolerating only omitted trailing empty cells."""
+
+    def trimmed(row: list[str]) -> list[str]:
+        result = row.copy()
+        while result and result[-1] == "":
+            result.pop()
+        return result
+
+    return len(left) == len(right) and all(
+        trimmed(a) == trimmed(b) for a, b in zip(left, right)
+    )
+
+
+def _persist_primary_dates(sheet, snapshot: list[list[str]]) -> list[list[str]]:
+    """Optimistic snapshot checks and read-back; Sheets has no atomic cell CAS."""
+    import gspread
+
+    if not snapshot or not any(snapshot[0]):
+        raise ValueError("Worksheet has no headers.")
+    original = [row.copy() for row in snapshot]
+    physical = original[0]
+    headers = _unique_headers(physical)
+    missing = [
+        name for name in PRIMARY_MILESTONE_COLUMNS if name not in headers
+    ]
+    planned: list[tuple[int, dict[str, str]]] = []
+    for index, row in enumerate(original[1:], 2):
+        if not any(str(cell).strip() for cell in row):
+            continue
+        raw = {
+            name: row[i] if i < len(row) else ""
+            for i, name in enumerate(headers)
+        }
+        updates = _primary_date_updates(raw)
+        if updates:
+            planned.append((index, updates))
+    if not missing and not planned:
+        return original
+    if not _same_sheet_snapshot(sheet.get_all_values(), original):
+        raise ValueError(
+            "Worksheet changed before date normalization. Refresh and retry."
+        )
+    expected = [row.copy() for row in original]
+    if missing:
+        # Append beyond every occupied column, including unnamed source columns.
+        width = max(len(row) for row in original)
+        needed = width + len(missing)
+        expected[0].extend([""] * (width - len(physical)))
+        expected[0].extend(missing)
+        if sheet.col_count < needed:
+            sheet.add_cols(needed - sheet.col_count)
+        if not _same_sheet_snapshot(sheet.get_all_values(), original):
+            raise ValueError(
+                "Worksheet changed before milestone headers were added. Refresh and retry."
+            )
+        sheet.batch_update(
+            [
+                {
+                    "range": gspread.utils.rowcol_to_a1(1, width + offset),
+                    "values": [[name]],
+                }
+                for offset, name in enumerate(missing, 1)
+            ],
+            value_input_option="RAW",
+        )
+    prepared = sheet.get_all_values()
+    if not _same_sheet_snapshot(prepared, expected):
+        raise RuntimeError(
+            "Date normalization headers or source rows could not be verified. Refresh before retrying."
+        )
+    headers = _unique_headers(expected[0])
+    cells: list[dict[str, str | list[list[str]]]] = []
+    for index, updates in planned:
+        row = expected[index - 1]
+        for name, value in updates.items():
+            column = headers.index(name)
+            row.extend([""] * max(0, column + 1 - len(row)))
+            if row[column] != value:
+                cells.append(
+                    {
+                        "range": gspread.utils.rowcol_to_a1(index, column + 1),
+                        "values": [[value]],
+                    }
+                )
+                row[column] = value
+    if cells:
+        # Recheck all original row values (including payment/status/journal)
+        # and the physical headers immediately before the cell-only write.
+        if not _same_sheet_snapshot(sheet.get_all_values(), prepared):
+            raise ValueError(
+                "Worksheet changed during date normalization. Refresh and retry."
+            )
+        sheet.batch_update(cells, value_input_option="RAW")
+        saved = sheet.get_all_values()
+        if not _same_sheet_snapshot(saved, expected):
+            raise RuntimeError(
+                "Date normalization read-back failed. Inspect Sheets and refresh; no payment was recorded."
+            )
+        return saved
+    return prepared
+
+
+def _date_month(value: str) -> str:
+    parsed = _date_value(value)
+    return parsed.strftime("%Y-%m") if parsed is not None else ""
+
+
 def _read_live_records() -> dict[str, object]:
     try:
         import gspread
@@ -1867,7 +2029,7 @@ def _read_live_records() -> dict[str, object]:
             spreadsheet
         )
         verified_ids = {p["extension_id"] for p in extension_payments}
-        values = sheet.get_all_values()
+        values = _persist_primary_dates(sheet, sheet.get_all_values())
         headers = _unique_headers(values[0])
         rows = values[1:]
         records: list[LoanRecord] = []
@@ -2150,9 +2312,13 @@ def _read_live_records() -> dict[str, object]:
                     for record in records
                     if record["month"] != "Unknown"
                 }
-                | {p["payment_date"][:7] for p in extension_payments}
                 | {
-                    r["date_settled"][:7]
+                    _date_month(p["payment_date"])
+                    for p in extension_payments
+                    if _date_month(p["payment_date"])
+                }
+                | {
+                    _date_month(r["date_settled"])
                     for r in records
                     if r["status"] == "Settled"
                     and _date_value(r["date_settled"])
@@ -2272,13 +2438,14 @@ def _extension_updates(
         or principal != _settlement_money(expected["principal"])
         or remaining != _settlement_money(expected["remaining_principal"])
         or interest != _settlement_money(expected["interest"])
-        or _iso_or_raw(raw.get("Payment Date", "")) != expected["payment_date"]
+        or _iso_or_raw(raw.get("Payment Date", ""))
+        != _iso_or_raw(expected["payment_date"])
     ):
         raise ValueError(
             "The live status, due date or amounts changed. Refresh and review before extending."
         )
     tender = _extension_cash(cash, interest)
-    new_due = max(today, due) + timedelta(days=30)
+    new_due = due + timedelta(days=30)
     next_interest = _settlement_money(remaining * interest / principal)
     return {
         "Status": "Extended",
@@ -2537,11 +2704,12 @@ def _extension_result(journal: dict[str, str]) -> str:
 
 
 def _validated_extension_entry(raw: dict[str, str]) -> ExtensionPayment:
+    raw = raw.copy()
     for key in ("Payment Date", "Old Due", "New Due"):
-        if not re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}", raw.get(key, "")
-        ) or not _date_value(raw[key]):
-            raise ValueError("Extension ledger has an invalid ISO date.")
+        parsed = _date_value(raw.get(key, ""))
+        if parsed is None:
+            raise ValueError("Extension ledger has an invalid date.")
+        raw[key] = parsed.isoformat()
     if raw.get("Extension ID") != _extension_id(
         raw["Ticket"], raw["Submission ID"], raw["Old Due"]
     ):
@@ -2563,9 +2731,8 @@ def _validated_extension_entry(raw: dict[str, str]) -> ExtensionPayment:
         != amounts["Interest Realized"] + amounts["Unapplied Excess"]
     ):
         raise ValueError("Extension ledger cash allocation is inconsistent.")
-    if date.fromisoformat(raw["New Due"]) != max(
-        date.fromisoformat(raw["Old Due"]),
-        date.fromisoformat(raw["Payment Date"]),
+    if date.fromisoformat(raw["New Due"]) != date.fromisoformat(
+        raw["Old Due"]
     ) + timedelta(days=30):
         raise ValueError("Extension ledger due transition is inconsistent.")
     return ExtensionPayment(
@@ -2762,20 +2929,30 @@ def _monthly_realized_interest(
         for r in records
         if r["status"] == "Settled"
         and not _is_sold(r["liquidation_status"])
-        and _date_value(r["date_settled"])
-        and r["date_settled"][:7] == month
+        and _date_month(r["date_settled"]) == month
     ]
-    unique = {
-        p["extension_id"]: p for p in payments if p["status"] == "Verified"
-    }
-    return _sum_cents(
-        settlement
-        + [
-            Decimal(p["interest"])
-            for p in unique.values()
-            if p["payment_date"][:7] == month
-        ]
-    )
+    grouped: dict[str, list[ExtensionPayment]] = {}
+    for payment in payments:
+        normalized = payment.copy()
+        normalized["payment_date"] = _iso_or_raw(payment["payment_date"])
+        if normalized["extension_id"]:
+            grouped.setdefault(normalized["extension_id"], []).append(
+                normalized
+            )
+    earned: list[Decimal] = []
+    for group in grouped.values():
+        payment = group[0]
+        if (
+            payment["status"] != "Verified"
+            or any(other != payment for other in group[1:])
+            or _date_month(payment["payment_date"]) != month
+            or not math.isfinite(payment["interest"])
+            or not math.isfinite(payment["cash"])
+            or not 0 <= payment["interest"] <= payment["cash"]
+        ):
+            continue
+        earned.append(Decimal(payment["interest"]))
+    return _sum_cents(settlement + earned)
 
 
 SETTLEMENT_COLUMNS: tuple[str, ...] = (
