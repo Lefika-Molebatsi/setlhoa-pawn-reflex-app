@@ -3103,7 +3103,7 @@ def _extension_ledger_rows(spreadsheet) -> tuple[object, list[dict[str, str]]]:
     if ledger is None:
         return None, []
     values = ledger.get_all_values()
-    if not values:
+    if not any(cell.strip() for row in values for cell in row):
         return ledger, []
     if len(set(values[0])) != len(values[0]) or not set(
         EXTENSION_COLUMNS
@@ -3201,7 +3201,8 @@ def _append_extension_payment(spreadsheet, journal: dict[str, str]) -> None:
             ledger, rows = _extension_ledger_rows(spreadsheet)
             if ledger is None:
                 raise
-    if not ledger.get_all_values():
+    values = ledger.get_all_values()
+    if not any(cell.strip() for row in values for cell in row):
         ledger.update(
             range_name="A1",
             values=[list(EXTENSION_COLUMNS)],

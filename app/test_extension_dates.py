@@ -32,6 +32,8 @@ from app.states.dashboard_state import (
     _historical_row_eligible,
     _verified_cycle_start,
     EXTENSION_COLUMNS,
+    _extension_ledger_rows,
+    _append_extension_payment,
 )
 
 
@@ -87,6 +89,7 @@ class FakePaymentWorksheet:
         self.fail_after_append = False
         self.fail_before_append = False
         self.append_count = 0
+        self.header_updates = 0
 
     def get_all_values(self):
         return copy.deepcopy(self.values)
@@ -95,6 +98,9 @@ class FakePaymentWorksheet:
         return self.values[row - 1].copy()
 
     def update(self, range_name, values, value_input_option):
+        assert range_name == "A1"
+        assert value_input_option == "RAW"
+        self.header_updates += 1
         self.values = copy.deepcopy(values)
 
     def append_row(self, values, value_input_option):
@@ -942,6 +948,126 @@ class ExtensionDateTests(unittest.TestCase):
             self.assertEqual(repaired["payment"]["payment_date"], "2026-10-03")
             self.assertEqual(sheet.batches, 1)
             self.assertEqual(ledger.append_count, 1)
+
+    def test_blank_new_ledger_historical_append_and_interrupted_reconciliation(
+        self,
+    ):
+        for blank in ([], [[]], [[], ["", ""], [" ", "\t"]]):
+            for failure in ("none", "before", "after"):
+                with self.subTest(blank=blank, failure=failure):
+                    sheet, expected = self.historical_fixture()
+                    spreadsheet = sheet.spreadsheet
+                    create = spreadsheet.add_worksheet
+
+                    def create_blank_ledger(*args, **kwargs):
+                        ledger = create(*args, **kwargs)
+                        ledger.values = copy.deepcopy(blank)
+                        ledger.fail_before_append = failure == "before"
+                        ledger.fail_after_append = failure == "after"
+                        return ledger
+
+                    with patch.object(
+                        spreadsheet,
+                        "add_worksheet",
+                        side_effect=create_blank_ledger,
+                    ):
+                        if failure == "none":
+                            result = self.historical_write(sheet, expected)
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                self.historical_write(sheet, expected)
+                    self.assertEqual(spreadsheet.creations, 1)
+                    self.assertEqual(sheet.batches, 1)
+                    primary = sheet.get_all_values()
+                    ledger = spreadsheet.ledger
+                    self.assertEqual(ledger.header_updates, 1)
+                    self.assertEqual(ledger.values[0], list(EXTENSION_COLUMNS))
+                    ledger.fail_before_append = ledger.fail_after_append = False
+                    result = _write_ticket_extension(
+                        sheet, expected, "", date(2026, 10, 10), repair=True
+                    )
+                    replay = _write_ticket_extension(
+                        sheet, expected, "", date(2026, 10, 10), repair=True
+                    )
+                    self.assertEqual(result["payment"], replay["payment"])
+                    self.assertTrue(result["primary_verified"])
+                    self.assertTrue(result["ledger_verified"])
+                    self.assertEqual(sheet.get_all_values(), primary)
+                    self.assertEqual(sheet.batches, 1)
+                    self.assertEqual(ledger.header_updates, 1)
+                    self.assertEqual(ledger.append_count, 1)
+                    self.assertEqual(len(ledger.values), 2)
+                    _, payments, _ = self.historical_reload(sheet, expected)
+                    self.assertEqual(len(payments), 1)
+                    self.assertEqual(payments[0]["status"], "Verified")
+                    self.assertEqual(payments[0]["ticket"], "SC-09-03-01")
+                    self.assertEqual(payments[0]["cash"], 450.0)
+                    self.assertEqual(payments[0]["interest"], 450.0)
+                    self.assertEqual(payments[0]["payment_date"], "2026-10-03")
+                    self.assertEqual(payments[0]["new_due"], "2026-11-02")
+
+    def test_saved_historical_journal_repairs_visually_empty_ledger(self):
+        sheet, expected = self.historical_fixture()
+        ledger = sheet.spreadsheet.add_worksheet("Extension Payments", 1000, 13)
+        ledger.values = [[]]
+        with patch(
+            "app.states.dashboard_state._append_extension_payment",
+            side_effect=ValueError(
+                "Simulated interrupted ledger initialization"
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.historical_write(sheet, expected)
+        primary = sheet.get_all_values()
+        saved = dict(
+            zip(_unique_headers(sheet.row_values(1)), sheet.row_values(2))
+        )
+        self.assertTrue(saved["Extension Transaction"])
+        self.assertEqual(ledger.values, [[]])
+        self.assertEqual(ledger.header_updates, 0)
+        for _ in range(2):
+            result = _write_ticket_extension(
+                sheet, expected, "", date(2026, 10, 10), repair=True
+            )
+            self.assertTrue(result["primary_verified"])
+            self.assertTrue(result["ledger_verified"])
+        self.assertEqual(sheet.get_all_values(), primary)
+        self.assertEqual(sheet.batches, 1)
+        self.assertEqual(ledger.header_updates, 1)
+        self.assertEqual(ledger.append_count, 1)
+        _, payments, _ = self.historical_reload(sheet, expected)
+        self.assertEqual(len(payments), 1)
+        self.assertEqual(payments[0]["status"], "Verified")
+        self.assertEqual(payments[0]["cash"], 450.0)
+        self.assertEqual(payments[0]["payment_date"], "2026-10-03")
+
+    def test_nonempty_malformed_ledger_headers_are_never_initialized(self):
+        sheet, expected = self.historical_fixture()
+        self.historical_write(sheet, expected)
+        ledger = sheet.spreadsheet.ledger
+        journal = dict(zip(ledger.values[0], ledger.values[1]))
+        for values in (
+            [["Unexpected header"]],
+            [list(EXTENSION_COLUMNS[:-1])],
+            [list(EXTENSION_COLUMNS) + [EXTENSION_COLUMNS[0]]],
+            [[], ["Historical data"]],
+            [["", " "], ["Historical data"]],
+        ):
+            with self.subTest(values=values):
+                ledger.values = copy.deepcopy(values)
+                before = ledger.get_all_values()
+                with self.assertRaisesRegex(
+                    ValueError, "headers are incomplete or duplicated"
+                ):
+                    _extension_ledger_rows(sheet.spreadsheet)
+                with self.assertRaisesRegex(
+                    ValueError, "headers are incomplete or duplicated"
+                ):
+                    _append_extension_payment(sheet.spreadsheet, journal)
+                self.assertEqual(ledger.get_all_values(), before)
+                self.assertEqual(ledger.header_updates, 1)
+                self.assertEqual(ledger.append_count, 1)
+                self.assertEqual(sheet.batches, 1)
 
     def test_historical_receipts_status_snapshot_and_duplicate_guards(self):
         for key, value in (
