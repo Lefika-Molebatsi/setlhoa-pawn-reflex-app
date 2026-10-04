@@ -1761,7 +1761,15 @@ def _record_due_date(raw: dict[str, str], issue: date | None) -> date | None:
     explicit = raw.get("Maturity / Due Date", "").strip()
     if not explicit:
         return _resolved_due_date("", issue)
-    return _date_value(explicit)
+    saved_extension = "extension" in _first(
+        raw, ["Payment Type"]
+    ).casefold() or (
+        _first(raw, ["Status", "Loan Status"]).casefold() == "extended"
+        and bool(_first(raw, ["Last Updated"]))
+    )
+    if saved_extension:
+        return _parse_business_date(explicit)
+    return _parse_jotform_source_date(explicit)
 
 
 def _days_to_due(due_date: date | None, today: date) -> int | None:
@@ -1787,6 +1795,8 @@ def _authoritative_date(
 ) -> date | None:
     primary = str(raw.get(source, "") or "").strip()
     if primary:
+        if source == "Date":
+            return _parse_jotform_source_date(primary)
         return _date_value(primary)
     return _date_value(_first(raw, aliases))
 
@@ -1876,11 +1886,15 @@ def _primary_date_updates(raw: dict[str, str]) -> dict[str, str]:
         "Date Settled",
         "Settlement Date",
         "Sale Date",
-        *PRIMARY_MILESTONE_COLUMNS,
+        *PRIMARY_MILESTONE_COLUMNS[1:],
     )
     for name in date_columns:
         value = raw.get(name, "")
-        parsed = _date_value(value)
+        parsed = (
+            _parse_jotform_source_date(value)
+            if name == "Date"
+            else _date_value(value)
+        )
         if parsed is not None and parsed.isoformat() != value:
             updates[name] = parsed.isoformat()
     issue = _authoritative_date(raw, "Date", list(ISSUE_DATE_COLUMNS[1:]))
