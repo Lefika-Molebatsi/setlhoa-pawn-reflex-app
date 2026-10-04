@@ -18,6 +18,11 @@ from app.states.dashboard_state import (
     _write_ticket_extension,
     _load_extension_payments,
     _monthly_realized_interest,
+    _confirmed_extension_match,
+    _extension_confirmation_text,
+    _first_valid_mobile,
+    DashboardState,
+    EMPTY_EXTENSION,
 )
 
 
@@ -217,7 +222,9 @@ class ExtensionDateTests(unittest.TestCase):
             result = _write_ticket_extension(
                 sheet, self.expected, "300.00", self.today
             )
-        self.assertIn("saved and verified", result)
+        self.assertIn("saved and verified", result["message"])
+        self.assertTrue(result["primary_verified"])
+        self.assertTrue(result["ledger_verified"])
         self.assertEqual(
             sheet.row_values(1)[: len(original_headers)], original_headers
         )
@@ -225,13 +232,99 @@ class ExtensionDateTests(unittest.TestCase):
         replay = _write_ticket_extension(
             sheet, self.expected, "300.00", self.today
         )
-        self.assertIn("saved and verified", replay)
+        self.assertIn("saved and verified", replay["message"])
         self.assertEqual(sheet.batches, 1)
         self.assertEqual(sheet.spreadsheet.ledger.append_count, 1)
         payments, _ = _load_extension_payments(sheet.spreadsheet)
         self.assertEqual(len(payments), 1)
         self.assertEqual(payments[0]["interest"], 300.0)
         self.assertEqual(payments[0]["principal"], 800.0)
+
+    def test_confirmation_requires_exact_verified_reloaded_transaction(self):
+        sheet = FakeWorksheet(self.raw)
+        result = _write_ticket_extension(
+            sheet, self.expected, "400.00", self.today
+        )
+        payments, _ = _load_extension_payments(sheet.spreadsheet)
+        ticket = dict(self.expected)
+        ticket.update(
+            status="Extended",
+            due_date=payments[0]["new_due"],
+            payment_date=payments[0]["payment_date"],
+        )
+        self.assertEqual(
+            _confirmed_extension_match(result, payments, [ticket]), payments[0]
+        )
+        for field in ("primary_verified", "ledger_verified"):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                _confirmed_extension_match(
+                    {**result, field: False}, payments, [ticket]
+                )
+        for loaded in (
+            [],
+            [{**payments[0], "cash": 999.0}],
+            [{**payments[0], "extension_id": "wrong"}],
+            payments * 2,
+        ):
+            with self.subTest(loaded=loaded), self.assertRaises(ValueError):
+                _confirmed_extension_match(result, loaded, [ticket])
+        with self.assertRaises(ValueError):
+            _confirmed_extension_match(
+                result, payments, [{**ticket, "extension_pending": True}]
+            )
+        with self.assertRaises(ValueError):
+            _confirmed_extension_match(result, payments, [])
+
+    def test_confirmation_uses_saved_amounts_and_verified_contact(self):
+        raw = {
+            **self.raw,
+            "Full Name - First Name": "Mpho",
+            "Full Name - Last Name": "Test",
+            "Mobile No.": "+267 7123 4567",
+        }
+        sheet = FakeWorksheet(raw)
+        result = _write_ticket_extension(
+            sheet, self.expected, "400.00", self.today
+        )
+        payments, _ = _load_extension_payments(sheet.spreadsheet)
+        ticket = {
+            **self.expected,
+            "status": "Extended",
+            "due_date": payments[0]["new_due"],
+            "payment_date": payments[0]["payment_date"],
+        }
+        state = DashboardState(_reflex_internal_init=True)
+        state._keep_extension_confirmation(
+            result, {"extension_payments": payments, "records": [ticket]}
+        )
+        state.selected_ticket = ""
+        self.assertEqual(state.last_confirmed_extension, payments[0])
+        preview = state.extension_confirmation_preview
+        self.assertIn("Hello Mpho Test,", preview)
+        self.assertIn("P400.00", preview)
+        self.assertIn("2026-10-04", preview)
+        self.assertIn("P800.00", preview)
+        from urllib.parse import unquote
+
+        url = state.extension_confirmation_url
+        self.assertTrue(url.startswith("https://wa.me/26771234567?text="))
+        self.assertEqual(unquote(url.split("?text=", 1)[1]), preview)
+        for invalid in ("", "—", "+27 71234567", "61234567", "7123456"):
+            state.last_extension_mobile = invalid
+            state.last_extension_contact = ""
+            self.assertEqual(state.extension_confirmation_url, "")
+        state.last_extension_contact = "00267 7123 4567"
+        self.assertTrue(state.extension_confirmation_url)
+        self.assertEqual(
+            _first_valid_mobile("invalid", "+267 71234567"), "71234567"
+        )
+        self.assertTrue(
+            _extension_confirmation_text(payments[0], "—").startswith("Hello,")
+        )
+        state._clear_extension_confirmation()
+        self.assertEqual(state.last_confirmed_extension, EMPTY_EXTENSION)
+        self.assertEqual(state.extension_confirmation_url, "")
+        self.assertEqual(state.extension_confirmation_preview, "")
 
     def test_missing_ledger_read_is_read_only(self):
         spreadsheet = FakeSpreadsheet()
@@ -259,7 +352,9 @@ class ExtensionDateTests(unittest.TestCase):
                 result = _write_ticket_extension(
                     sheet, self.expected, "", self.today, repair=True
                 )
-                self.assertIn("saved and verified", result)
+                self.assertIn("saved and verified", result["message"])
+                self.assertTrue(result["primary_verified"])
+                self.assertTrue(result["ledger_verified"])
                 self.assertEqual(sheet.batches, 1)
                 self.assertEqual(ledger.append_count, 1)
                 payments, _ = _load_extension_payments(sheet.spreadsheet)

@@ -145,6 +145,87 @@ class ExtensionPayment(TypedDict):
     status: str
 
 
+EMPTY_EXTENSION: ExtensionPayment = {
+    "extension_id": "",
+    "ticket": "",
+    "submission_id": "",
+    "payment_date": "",
+    "old_due": "",
+    "new_due": "",
+    "cash": 0.0,
+    "interest": 0.0,
+    "excess": 0.0,
+    "principal": 0.0,
+    "status": "",
+}
+
+
+class ExtensionWriteResult(TypedDict):
+    primary_verified: bool
+    ledger_verified: bool
+    payment: ExtensionPayment
+    customer: str
+    mobile: str
+    contact: str
+    message: str
+
+
+def _confirmed_extension_match(
+    result: ExtensionWriteResult,
+    payments: list[ExtensionPayment],
+    records: list[LoanRecord],
+) -> ExtensionPayment:
+    payment = result["payment"]
+    if not result["primary_verified"] or not result["ledger_verified"]:
+        raise ValueError("Both extension writes must be verified.")
+    if (
+        payment["extension_id"]
+        != _extension_id(
+            payment["ticket"], payment["submission_id"], payment["old_due"]
+        )
+        or payment["status"] != "Verified"
+    ):
+        raise ValueError("Extension transaction identity is invalid.")
+    matches = [
+        p for p in payments if p["extension_id"] == payment["extension_id"]
+    ]
+    tickets = [
+        r
+        for r in records
+        if r["ticket"] == payment["ticket"]
+        and r["submission_id"] == payment["submission_id"]
+    ]
+    if len(matches) != 1 or matches[0] != payment or len(tickets) != 1:
+        raise ValueError(
+            "Reload did not return the verified extension transaction."
+        )
+    ticket = tickets[0]
+    if (
+        ticket["extension_pending"]
+        or ticket["due_date"] != payment["new_due"]
+        or ticket["remaining_principal"] != payment["principal"]
+        or ticket["payment_date"] != payment["payment_date"]
+        or ticket["status"] != "Extended"
+    ):
+        raise ValueError(
+            "Reloaded ticket no longer matches the verified extension."
+        )
+    return matches[0].copy()
+
+
+def _extension_confirmation_text(
+    payment: ExtensionPayment, customer: str
+) -> str:
+    name = " ".join(customer.split()).strip()
+    greeting = f"Hello {name}," if name and name != "—" else "Hello,"
+    return (
+        f"{greeting} Setlhoa Cash Solutions confirms receipt of P{payment['cash']:,.2f} "
+        f"on {payment['payment_date']} for the extension of ticket {payment['ticket']}. "
+        f"Your new maturity date is {payment['new_due']}. "
+        f"Your principal of P{payment['principal']:,.2f} remains due and unchanged. Thank you."
+    )
+
+
 class SettlementAmounts(TypedDict):
     principal: Decimal
     interest: Decimal
@@ -504,6 +585,45 @@ class ReminderSummary(TypedDict):
 class DashboardState(rx.State):
     records: list[LoanRecord] = []
     extension_payments: list[ExtensionPayment] = []
+    last_confirmed_extension: ExtensionPayment = dict(EMPTY_EXTENSION)
+    last_extension_customer: str = ""
+    last_extension_mobile: str = ""
+    last_extension_contact: str = ""
+
+    def _clear_extension_confirmation(self):
+        self.last_confirmed_extension = dict(EMPTY_EXTENSION)
+        self.last_extension_customer = ""
+        self.last_extension_mobile = ""
+        self.last_extension_contact = ""
+
+    def _keep_extension_confirmation(
+        self, result: ExtensionWriteResult, payload: dict[str, object]
+    ):
+        payment = _confirmed_extension_match(
+            result, payload["extension_payments"], payload["records"]
+        )
+        self.last_confirmed_extension = payment
+        self.last_extension_customer = result["customer"]
+        self.last_extension_mobile = result["mobile"]
+        self.last_extension_contact = result["contact"]
+
+    @rx.var
+    def extension_confirmation_preview(self) -> str:
+        if not self.last_confirmed_extension["extension_id"]:
+            return ""
+        return _extension_confirmation_text(
+            self.last_confirmed_extension, self.last_extension_customer
+        )
+
+    @rx.var
+    def extension_confirmation_url(self) -> str:
+        mobile = _first_valid_mobile(
+            self.last_extension_mobile, self.last_extension_contact
+        )
+        if not mobile or not self.last_confirmed_extension["extension_id"]:
+            return ""
+        return f"https://wa.me/267{mobile}?text={quote(self.extension_confirmation_preview, safe='')}"
+
     extension_ledger_message: str = (
         "Refresh Sheets to load persisted extension payments."
     )
@@ -786,6 +906,7 @@ class DashboardState(rx.State):
 
     @rx.event
     def select_inventory_ticket(self, ticket: str):
+        self._clear_extension_confirmation()
         self.selected_ticket = ticket
         self.sale_revenue = ""
         self.sale_date = _gaborone_date().isoformat()
@@ -981,6 +1102,7 @@ class DashboardState(rx.State):
     async def extend_ticket(self):
         if self.operation_loading or self.is_loading:
             return
+        self._clear_extension_confirmation()
         self.error_message = ""
         self.success_message = ""
         self.extension_error = ""
@@ -1004,11 +1126,12 @@ class DashboardState(rx.State):
             result = await asyncio.to_thread(
                 _record_extension, expected, self.payment_amount
             )
-            self.success_message = result
             self.payment_amount = ""
             self.selected_ticket = ""
             try:
                 payload = await asyncio.to_thread(_read_live_records)
+                self._keep_extension_confirmation(result, payload)
+                self.success_message = result["message"]
                 self.records = payload["records"]
                 self.extension_payments = payload["extension_payments"]
                 self.extension_ledger_message = payload[
@@ -1023,7 +1146,9 @@ class DashboardState(rx.State):
                 self.last_refresh = _gaborone_now()
             except Exception as e:
                 logging.exception(f"Error: {e}")
-                self.error_message = "Extension saved and verified, but refresh failed. Refresh Sheets; do not repeat the payment."
+                self._clear_extension_confirmation()
+                self.success_message = ""
+                self.error_message = "Extension confirmation unavailable: reload failed or the saved transaction did not match. Inspect Sheets and reconcile if needed; do not repeat the payment."
                 self.sheets_health = "Refresh needed"
         except ValueError as e:
             self.extension_error = str(e)
@@ -1060,6 +1185,7 @@ class DashboardState(rx.State):
     def select_ticket(self, ticket: str):
         if self.operation_loading:
             return
+        self._clear_extension_confirmation()
         self.selected_ticket = ticket
         self.payment_amount = ""
         self.extension_error = ""
@@ -1071,6 +1197,7 @@ class DashboardState(rx.State):
     @rx.event
     def set_payment_amount(self, value: str):
         if not self.operation_loading:
+            self._clear_extension_confirmation()
             self.payment_amount = value
             self.extension_error = ""
 
@@ -1078,7 +1205,8 @@ class DashboardState(rx.State):
     async def settle_ticket(self):
         if self.operation_loading:
             return
-        self.error_message = ""
+        self._clear_extension_confirmation()
+        self.error_message
         self.success_message = ""
         if not self.settlement_eligible:
             self.error_message = "Select an unsold Active or Extended ticket before settling. Refresh Sheets if its status changed."
@@ -1185,6 +1313,7 @@ class DashboardState(rx.State):
                 "Select a ticket before performing an operation."
             )
             return
+        self._clear_extension_confirmation()
         self.operation_loading = True
         self.error_message = ""
         self.success_message = ""
@@ -1275,6 +1404,7 @@ class DashboardState(rx.State):
             or not self.selected_record["extension_pending"]
         ):
             return
+        self._clear_extension_confirmation()
         self.operation_loading = True
         self.extension_error = ""
         self.success_message = ""
@@ -1283,12 +1413,13 @@ class DashboardState(rx.State):
                 _record_extension, self.selected_record.copy(), "", True
             )
             payload = await asyncio.to_thread(_read_live_records)
+            self._keep_extension_confirmation(result, payload)
             self.records = payload["records"]
             self.extension_payments = payload["extension_payments"]
             self.extension_ledger_message = payload["extension_ledger_message"]
             self.months = payload["months"]
             self.last_refresh = _gaborone_now()
-            self.success_message = result
+            self.success_message = result["message"]
         except Exception as e:
             logging.exception(f"Error: {e}")
             self.extension_error = "Reconciliation could not be verified. Keep the saved transaction intact and retry reconciliation; do not collect another payment."
@@ -1353,6 +1484,7 @@ class DashboardState(rx.State):
     async def refresh_sheets(self):
         if self.operation_loading:
             return
+        self._clear_extension_confirmation()
         self.is_loading = True
         self.error_message = ""
         self.success_message = ""
@@ -2171,7 +2303,7 @@ def _write_ticket_extension(
     today: date,
     spreadsheet=None,
     repair: bool = False,
-) -> str:
+) -> ExtensionWriteResult:
     """Optimistic live check, append-only headers, one RAW batch, then read-back."""
     import gspread
 
@@ -2223,7 +2355,7 @@ def _write_ticket_extension(
                 raise RuntimeError(
                     "Primary extension changed during reconciliation. Refresh and inspect the saved transaction."
                 )
-            return _extension_result(journal)
+            return _extension_verified_result(journal, final_raw)
         existing, _ = _load_extension_payments(spreadsheet)
         if not any(p["extension_id"] == saved_id for p in existing):
             raise ValueError(
@@ -2312,12 +2444,12 @@ def _write_ticket_extension(
         raise RuntimeError(
             "Payment persisted but primary transaction changed. Refresh and reconcile before proceeding."
         )
-    return _extension_result(journal)
+    return _extension_verified_result(journal, final_raw)
 
 
 def _record_extension(
     expected: LoanRecord, cash: str, repair: bool = False
-) -> str:
+) -> ExtensionWriteResult:
     try:
         import gspread
         from google.oauth2 import service_account
@@ -2375,6 +2507,29 @@ def _extension_sheet_money(value: str) -> Decimal:
             "A required extension amount is missing. Correct Sheets and refresh."
         )
     return _settlement_cash(text)
+
+
+def _extension_verified_result(
+    journal: dict[str, str], raw: dict[str, str]
+) -> ExtensionWriteResult:
+    return ExtensionWriteResult(
+        primary_verified=True,
+        ledger_verified=True,
+        payment=_validated_extension_entry(journal),
+        customer=" ".join(
+            filter(
+                None,
+                (
+                    raw.get("Full Name - First Name", ""),
+                    raw.get("Full Name - Middle Name", ""),
+                    raw.get("Full Name - Last Name", ""),
+                ),
+            )
+        ).strip(),
+        mobile=raw.get("Mobile No.", ""),
+        contact=raw.get("Mobile No.", ""),
+        message=_extension_result(journal),
+    )
 
 
 def _extension_result(journal: dict[str, str]) -> str:

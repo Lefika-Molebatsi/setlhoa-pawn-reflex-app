@@ -1788,9 +1788,136 @@ def extension_payment_table(
     )
 
 
+def extension_confirmation_card() -> rx.Component:
+    return rx.el.section(
+        rx.el.div(
+            rx.icon(
+                "circle-check", class_name="h-5 w-5 shrink-0 text-[#189b2b]"
+            ),
+            rx.el.div(
+                rx.el.h2(
+                    "Extension payment confirmed",
+                    class_name="text-base font-semibold text-slate-900",
+                ),
+                rx.el.p(
+                    "Ticket and payment ledger verified · saved transaction reloaded",
+                    class_name="mt-1 text-xs text-slate-600",
+                ),
+            ),
+            class_name="flex items-start gap-3",
+        ),
+        rx.el.dl(
+            rx.el.div(
+                rx.el.dt("Ticket", class_name="text-xs text-slate-600"),
+                rx.el.dd(
+                    DashboardState.last_confirmed_extension["ticket"],
+                    class_name="mt-1 break-all font-['IBM_Plex_Mono'] text-sm font-semibold text-[#189b2b]",
+                ),
+            ),
+            rx.el.div(
+                rx.el.dt("Payment date", class_name="text-xs text-slate-600"),
+                rx.el.dd(
+                    DashboardState.last_confirmed_extension["payment_date"],
+                    class_name="mt-1 font-['IBM_Plex_Mono'] text-sm text-slate-900",
+                ),
+            ),
+            rx.el.div(
+                rx.el.dt("Cash received", class_name="text-xs text-slate-600"),
+                rx.el.dd(
+                    f"P{DashboardState.last_confirmed_extension['cash']:,.2f}",
+                    class_name="mt-1 font-['IBM_Plex_Mono'] text-sm font-semibold text-slate-900",
+                ),
+            ),
+            rx.el.div(
+                rx.el.dt(
+                    "Interest credited", class_name="text-xs text-slate-600"
+                ),
+                rx.el.dd(
+                    f"P{DashboardState.last_confirmed_extension['interest']:,.2f}",
+                    class_name="mt-1 font-['IBM_Plex_Mono'] text-sm text-slate-900",
+                ),
+            ),
+            rx.cond(
+                DashboardState.last_confirmed_extension["excess"] > 0,
+                rx.el.div(
+                    rx.el.dt(
+                        "Unapplied excess · not interest or principal",
+                        class_name="text-xs text-slate-600",
+                    ),
+                    rx.el.dd(
+                        f"P{DashboardState.last_confirmed_extension['excess']:,.2f}",
+                        class_name="mt-1 font-['IBM_Plex_Mono'] text-sm text-slate-900",
+                    ),
+                ),
+                rx.fragment(),
+            ),
+            rx.el.div(
+                rx.el.dt(
+                    "Due date · old → new (ISO)",
+                    class_name="text-xs text-slate-600",
+                ),
+                rx.el.dd(
+                    f"{DashboardState.last_confirmed_extension['old_due']} → {DashboardState.last_confirmed_extension['new_due']}",
+                    class_name="mt-1 font-['IBM_Plex_Mono'] text-sm text-slate-900",
+                ),
+            ),
+            rx.el.div(
+                rx.el.dt(
+                    "Principal still due · unchanged",
+                    class_name="text-xs text-slate-600",
+                ),
+                rx.el.dd(
+                    f"P{DashboardState.last_confirmed_extension['principal']:,.2f}",
+                    class_name="mt-1 font-['IBM_Plex_Mono'] text-sm font-semibold text-slate-900",
+                ),
+            ),
+            class_name="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3",
+        ),
+        rx.el.div(
+            rx.el.h3(
+                "CUSTOMER CONFIRMATION PREVIEW",
+                class_name="font-['IBM_Plex_Mono'] text-[10px] font-semibold tracking-wide text-slate-600",
+            ),
+            rx.el.p(
+                DashboardState.extension_confirmation_preview,
+                class_name="mt-2 break-words text-sm leading-6 text-slate-800",
+            ),
+            rx.cond(
+                DashboardState.extension_confirmation_url != "",
+                rx.el.a(
+                    rx.icon("message-circle", class_name="h-4 w-4"),
+                    "Open WhatsApp confirmation",
+                    rx.icon("external-link", class_name="h-3 w-3"),
+                    href=DashboardState.extension_confirmation_url,
+                    target="_blank",
+                    rel="noopener noreferrer",
+                    class_name="mt-3 inline-flex w-fit items-center gap-2 bg-[#189b2b] px-3 py-2 text-xs font-semibold text-white hover:bg-[#147f23] focus:outline-hidden focus:ring-2 focus:ring-[#189b2b] focus:ring-offset-2",
+                ),
+                rx.el.p(
+                    "No valid customer mobile — confirmation link unavailable",
+                    class_name="mt-3 text-xs font-medium text-slate-600",
+                ),
+            ),
+            rx.el.p(
+                "Opening WhatsApp does not send the message. Review and send manually. This card clears when another ticket/action starts or Sheets is refreshed.",
+                class_name="mt-2 text-xs leading-5 text-slate-500",
+            ),
+            class_name="mt-4 border-t border-slate-200 pt-4",
+        ),
+        role="status",
+        class_name="mt-5 w-full border border-[#189b2b]/40 border-l-4 border-l-[#189b2b] bg-green-50/70 p-4 font-['IBM_Plex_Sans'] sm:p-5",
+    )
+
+
 def scheduled_panel() -> rx.Component:
     return rx.el.div(
         integration_strip(),
+        rx.cond(
+            (DashboardState.active_tab == "payments")
+            & (DashboardState.last_confirmed_extension["extension_id"] != ""),
+            extension_confirmation_card(),
+            rx.fragment(),
+        ),
         operations_panel(),
         rx.cond(
             DashboardState.active_tab == "payments",
