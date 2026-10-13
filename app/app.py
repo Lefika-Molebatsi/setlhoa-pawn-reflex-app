@@ -12,12 +12,14 @@ from app.components.dashboard_ui import (
     electronics_panel,
 )
 from app.states.dashboard_state import DashboardState
+from app.components.financials import financial_panel
 
 
 def content() -> rx.Component:
     return rx.match(
         DashboardState.active_tab,
         ("dashboard", dashboard_panel()),
+        ("financials", financial_panel()),
         ("ledger", scheduled_panel()),
         ("payments", scheduled_panel()),
         ("reminders", reminders_panel()),

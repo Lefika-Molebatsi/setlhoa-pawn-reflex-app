@@ -1,6 +1,7 @@
 import reflex as rx
 
 import asyncio
+import reflex_xy
 import hashlib
 import json
 import logging
@@ -589,6 +590,110 @@ class ReminderSummary(TypedDict):
     message: str
 
 
+class FinancialMonthRow(TypedDict):
+    month: str
+    deployed: float
+    settlement: float
+    extension: float
+    liquidation: float
+    total: float
+
+
+class FinancialChartColumns(TypedDict):
+    month: list[str]
+    deployed: list[float]
+    profit: list[float]
+
+
+def _financial_records(records: list[LoanRecord]) -> list[LoanRecord]:
+    unique: list[LoanRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for record in records:
+        identity = (record["ticket"], record["submission_id"])
+        if any(identity):
+            if identity in seen:
+                continue
+            seen.add(identity)
+        unique.append(record)
+    return unique
+
+
+def _original_financial_month(record: LoanRecord) -> str:
+    return _date_month(record["issue_date"]) or _date_month(record["loan_date"])
+
+
+def _original_approved_capital(record: LoanRecord) -> float:
+    amount = record["approved"] or record["principal"]
+    return _sheet_cents(amount) if _original_financial_month(record) else 0.0
+
+
+def _financial_month_rows(
+    records: list[LoanRecord], payments: list[ExtensionPayment]
+) -> list[FinancialMonthRow]:
+    records = _financial_records(records)
+    months: set[str] = set()
+    for record in records:
+        months.update(
+            (
+                _original_financial_month(record),
+                _date_month(record["date_settled"]),
+                _date_month(record["payment_date"]),
+                _date_month(record["sale_date"]),
+            )
+        )
+    months.update(_date_month(payment["payment_date"]) for payment in payments)
+    months.discard("")
+    rows: list[FinancialMonthRow] = []
+    for month in sorted(months, reverse=True):
+        deployed = _sum_cents(
+            _original_approved_capital(record)
+            for record in records
+            if _original_financial_month(record) == month
+        )
+        settlement = _monthly_realized_interest(records, [], month)
+        extension = _monthly_realized_interest([], payments, month)
+        liquidation = _sum_cents(
+            Decimal(str(record["final_revenue"]))
+            - Decimal(str(record["principal"]))
+            for record in records
+            if _is_sold(record["liquidation_status"])
+            and _date_month(record["sale_date"]) == month
+            and math.isfinite(record["final_revenue"])
+            and math.isfinite(record["principal"])
+        )
+        rows.append(
+            FinancialMonthRow(
+                month=month,
+                deployed=deployed,
+                settlement=settlement,
+                extension=extension,
+                liquidation=liquidation,
+                total=_sum_cents((settlement, extension, liquidation)),
+            )
+        )
+    return rows
+
+
+def _financial_expected_inflows(
+    records: list[LoanRecord], today: date
+) -> float:
+    end = today + timedelta(days=30)
+    eligible: list[float] = []
+    for record in _financial_records(records):
+        due = _date_value(record["due_date"])
+        if (
+            record["status"] in {"Active", "Extended"}
+            and not _is_sold(record["liquidation_status"])
+            and not _date_value(record["date_settled"])
+            and due is not None
+            and today <= due <= end
+            and math.isfinite(record["total_due"])
+            and record["total_due"] >= 0
+        ):
+            eligible.append(record["total_due"])
+    return _sum_cents(eligible)
+
+
 class DashboardState(rx.State):
     records: list[LoanRecord] = []
     extension_payments: list[ExtensionPayment] = []
@@ -636,6 +741,71 @@ class DashboardState(rx.State):
     )
     months: list[str] = []
     selected_month: str = "ALL"
+    financial_month: str = "ALL"
+
+    @rx.var
+    def financial_rows(self) -> list[FinancialMonthRow]:
+        return _financial_month_rows(self.records, self.extension_payments)
+
+    @rx.var
+    def financial_months(self) -> list[str]:
+        return [row["month"] for row in self.financial_rows]
+
+    @rx.var
+    def financial_filtered_rows(self) -> list[FinancialMonthRow]:
+        return [
+            row
+            for row in self.financial_rows
+            if self.financial_month == "ALL"
+            or row["month"] == self.financial_month
+        ]
+
+    @rx.var
+    def financial_subtotals(self) -> dict[str, float]:
+        return {
+            category: _sum_cents(
+                row[category] for row in self.financial_filtered_rows
+            )
+            for category in ("settlement", "extension", "liquidation", "total")
+        }
+
+    @rx.var
+    def financial_total_deployed(self) -> float:
+        return _sum_cents(
+            _original_approved_capital(record)
+            for record in _financial_records(self.records)
+        )
+
+    @rx.var
+    def financial_cumulative_profit(self) -> float:
+        return _sum_cents(row["total"] for row in self.financial_rows)
+
+    @rx.var(cache=False)
+    def financial_expected_inflows(self) -> float:
+        return _financial_expected_inflows(self.records, _gaborone_date())
+
+    @rx.var(cache=False)
+    def financial_forecast_window(self) -> str:
+        today = _gaborone_date()
+        return f"{today.isoformat()} → {(today + timedelta(days=30)).isoformat()} · inclusive"
+
+    def _financial_chart_columns(self) -> FinancialChartColumns:
+        rows = list(reversed(self.financial_rows))
+        return FinancialChartColumns(
+            month=[row["month"] for row in rows],
+            deployed=[row["deployed"] for row in rows],
+            profit=[row["total"] for row in rows],
+        )
+
+    @reflex_xy.data
+    def financial_trends(self) -> FinancialChartColumns:
+        return self._financial_chart_columns()
+
+    @rx.event
+    def choose_financial_month(self, value: str):
+        if value == "ALL" or value in self.financial_months:
+            self.financial_month = value
+
     is_loading: bool = False
     is_reconciling: bool = False
     error_message: str = ""

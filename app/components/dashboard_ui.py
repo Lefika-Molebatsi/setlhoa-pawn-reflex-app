@@ -73,6 +73,11 @@ def sidebar() -> rx.Component:
             "label": "Executive Dashboard",
             "icon": "layout-dashboard",
         },
+        {
+            "value": "financials",
+            "label": "Financials",
+            "icon": "chart-no-axes-combined",
+        },
         {"value": "ledger", "label": "Active Pawn Ledger", "icon": "book-open"},
         {
             "value": "payments",

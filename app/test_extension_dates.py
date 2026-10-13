@@ -787,6 +787,8 @@ class ExtensionDateTests(unittest.TestCase):
         }
         other = {**self.expected, "ticket": "OTHER", "due_date": "2026-10-15"}
         state = DashboardState(_reflex_internal_init=True)
+        state.extension_payments = []
+        state.selected_month = "ALL"
         state.records = [other, expected, september]
         state.active_tab = "ledger"
         state.selected_ticket = expected["ticket"]
