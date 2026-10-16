@@ -603,10 +603,13 @@ def operations_panel() -> rx.Component:
             ),
             rx.el.div(
                 rx.el.select(
+                    rx.el.option(
+                        "Open loans (Active + Extended)", value="OPEN"
+                    ),
                     rx.el.option("All statuses", value="ALL"),
                     rx.el.option("Active", value="Active"),
-                    rx.el.option("Settled", value="Settled"),
                     rx.el.option("Extended", value="Extended"),
+                    rx.el.option("Settled", value="Settled"),
                     rx.el.option("Defaulted", value="Defaulted"),
                     value=DashboardState.status_filter,
                     on_change=DashboardState.set_status_filter,
@@ -645,23 +648,51 @@ def operations_panel() -> rx.Component:
             rx.fragment(),
         ),
         rx.el.div(
-            rx.el.div(
-                rx.el.table(
-                    rx.el.thead(
-                        rx.el.tr(
-                            rx.foreach(LEDGER_COLUMNS, _sticky_th),
-                            class_name=["border-b", BORDER],
-                        )
+            rx.cond(
+                DashboardState.filtered_records.length() > 0,
+                rx.el.div(
+                    rx.el.table(
+                        rx.el.thead(
+                            rx.el.tr(
+                                rx.foreach(LEDGER_COLUMNS, _sticky_th),
+                                class_name=["border-b", BORDER],
+                            )
+                        ),
+                        rx.el.tbody(
+                            rx.foreach(
+                                DashboardState.filtered_records, _ledger_row
+                            )
+                        ),
+                        class_name="table-auto w-max min-w-full text-sm",
                     ),
-                    rx.el.tbody(
-                        rx.foreach(DashboardState.filtered_records, _ledger_row)
-                    ),
-                    class_name="table-auto w-max min-w-full text-sm",
+                    class_name=[
+                        "mt-5 max-h-[70vh] overflow-auto rounded-sm border",
+                        SURFACE,
+                    ],
                 ),
-                class_name=[
-                    "mt-5 max-h-[70vh] overflow-auto rounded-sm border",
-                    SURFACE,
-                ],
+                rx.el.div(
+                    rx.icon("search-x", class_name=["h-5 w-5", TEXT_MUTED]),
+                    rx.el.p(
+                        "No tickets match this view.",
+                        class_name=["mt-2 text-sm font-semibold", TEXT_STRONG],
+                    ),
+                    rx.el.p(
+                        rx.cond(
+                            DashboardState.status_filter == "OPEN",
+                            "No operationally open Active or Extended loans match your search. Try clearing the search or choose All statuses to review settled and defaulted tickets.",
+                            "Try clearing the search or selecting a different status filter.",
+                        ),
+                        class_name=[
+                            "mt-1 max-w-2xl text-xs leading-5",
+                            TEXT_MUTED,
+                        ],
+                    ),
+                    class_name=[
+                        "mt-5 flex flex-col items-center rounded-sm border px-6 py-10 text-center",
+                        SURFACE,
+                    ],
+                    role="status",
+                ),
             ),
             rx.cond(
                 DashboardState.selected_ticket != "",

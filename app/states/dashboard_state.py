@@ -929,15 +929,7 @@ class DashboardState(rx.State):
         return [
             record
             for record in self.records
-            if (
-                self.status_filter == "ALL"
-                or record["status"] == self.status_filter
-            )
-            and (
-                not query
-                or query
-                in f"{record['ticket']} {record['customer']} {record['mobile']} {record['category']} {record['item']}".lower()
-            )
+            if _ledger_record_matches(record, self.status_filter, query)
         ]
 
     @rx.var
@@ -1422,13 +1414,32 @@ class DashboardState(rx.State):
             f"https://wa.me/267{normalized}?text={quote(self.notice_message)}"
         )
 
+    def _clear_hidden_ticket(self, status_filter: str, query: str):
+        if self.selected_ticket and not any(
+            record["ticket"] == self.selected_ticket
+            and _ledger_record_matches(record, status_filter, query)
+            for record in self.records
+        ):
+            self.selected_ticket = ""
+
     @rx.event
     def set_search(self, value: str):
         self.ledger_search = value
+        self._clear_hidden_ticket(self.status_filter, value.lower().strip())
 
     @rx.event
     def set_status_filter(self, value: str):
+        if value not in {
+            "OPEN",
+            "ALL",
+            "Active",
+            "Extended",
+            "Settled",
+            "Defaulted",
+        }:
+            return
         self.status_filter = value
+        self._clear_hidden_ticket(value, self.ledger_search.lower().strip())
 
     @rx.event
     def select_ticket(self, ticket: str):
@@ -1744,6 +1755,16 @@ class DashboardState(rx.State):
 
     @rx.event
     def choose_tab(self, value: str):
+        if value != self.active_tab:
+            if value == "ledger":
+                self.status_filter = "OPEN"
+            elif value == "payments":
+                self.status_filter = "ALL"
+            if self.active_tab in {"ledger", "payments"} or value in {
+                "ledger",
+                "payments",
+            }:
+                self.selected_ticket = ""
         self.active_tab = value
 
     @rx.event
@@ -1819,6 +1840,27 @@ def _first_valid_mobile(mobile: str, contact: str) -> str:
 
 def _is_sold(value: str) -> bool:
     return value.strip().casefold() in {"sold", "liquidated / sold"}
+
+
+def _ledger_record_matches(
+    record: LoanRecord, status_filter: str, query: str
+) -> bool:
+    if status_filter == "OPEN":
+        status_matches = (
+            record["status"] in {"Active", "Extended"}
+            and not record["date_settled"].strip()
+            and not _is_sold(record["liquidation_status"])
+        )
+    else:
+        status_matches = (
+            status_filter == "ALL" or record["status"] == status_filter
+        )
+    search_matches = (
+        not query
+        or query
+        in f"{record['ticket']} {record['customer']} {record['mobile']} {record['category']} {record['item']}".lower()
+    )
+    return status_matches and search_matches
 
 
 def _money(value: str) -> float:
