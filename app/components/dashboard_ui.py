@@ -589,13 +589,14 @@ def operations_panel() -> rx.Component:
                 class_name=["text-xs font-medium", TEXT_SECONDARY],
             ),
             rx.el.input(
-                default_value=DashboardState.ledger_search,
-                on_change=DashboardState.set_search.debounce(400),
+                on_change=DashboardState.set_search,
                 placeholder="Search…",
+                key=DashboardState.active_tab,
                 class_name=[
                     f"mt-2 w-full rounded-sm border px-3 py-2 text-sm {FOCUS}",
                     FIELD,
                 ],
+                default_value=DashboardState.ledger_search,
             ),
             rx.el.label(
                 "Status",

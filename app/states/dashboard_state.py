@@ -1758,8 +1758,10 @@ class DashboardState(rx.State):
         if value != self.active_tab:
             if value == "ledger":
                 self.status_filter = "OPEN"
+                self.ledger_search = ""
             elif value == "payments":
                 self.status_filter = "ALL"
+                self.ledger_search = ""
             if self.active_tab in {"ledger", "payments"} or value in {
                 "ledger",
                 "payments",
@@ -1848,7 +1850,7 @@ def _ledger_record_matches(
     if status_filter == "OPEN":
         status_matches = (
             record["status"] in {"Active", "Extended"}
-            and not record["date_settled"].strip()
+            and _date_value(record["date_settled"]) is None
             and not _is_sold(record["liquidation_status"])
         )
     else:
@@ -2092,6 +2094,13 @@ def _authoritative_date(
 
 def _display_text(value: str) -> str:
     return str(value or "").strip() or "—"
+
+
+def _record_date_settled(raw: dict[str, str], status: str) -> str:
+    settlement_date = _first(raw, ["Date Settled", "Settlement Date"])
+    if not settlement_date and status == "Settled":
+        settlement_date = _first(raw, ["Payment Date"])
+    return _display_text(_iso_or_raw(settlement_date))
 
 
 def _interest_rate(value: str) -> tuple[float, str]:
@@ -2430,9 +2439,7 @@ def _read_live_records() -> dict[str, object]:
             penalty = penalty if penalty > 0 else 0.0
             today = _gaborone_date()
             settled = status == "Settled"
-            date_settled = _iso_or_raw(
-                _first(raw, ["Date Settled", "Settlement Date", "Payment Date"])
-            )
+            date_settled = _record_date_settled(raw, status)
             settled_on = _date_value(date_settled) if settled else None
             days_overdue = (
                 max(0, ((settled_on or due_date) - due_date).days)

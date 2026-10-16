@@ -1,23 +1,37 @@
 import unittest
 
-from app.states.dashboard_state import DashboardState, EMPTY_RECORD
+from app.states.dashboard_state import (
+    DashboardState,
+    EMPTY_RECORD,
+    _ledger_record_matches,
+    _record_date_settled,
+)
 
 
 class LedgerFilteringTests(unittest.TestCase):
     def setUp(self):
         self.state = DashboardState(_reflex_internal_init=True)
+        self.state.ledger_search = ""
+        self.state.status_filter = "ALL"
+        self.state.active_tab = "dashboard"
+        self.state.selected_ticket = ""
         self.records = [
             {
                 **EMPTY_RECORD,
                 "ticket": "ACTIVE",
                 "customer": "Ada",
                 "status": "Active",
+                "date_settled": "—",
             },
             {
                 **EMPTY_RECORD,
                 "ticket": "EXTENDED",
                 "customer": "Bola",
                 "status": "Extended",
+                "date_settled": _record_date_settled(
+                    {"Payment Date": "2026-10-03"}, "Extended"
+                ),
+                "payment_date": "2026-10-03",
             },
             {**EMPTY_RECORD, "ticket": "SETTLED", "status": "Settled"},
             {**EMPTY_RECORD, "ticket": "DEFAULTED", "status": "Defaulted"},
@@ -50,6 +64,40 @@ class LedgerFilteringTests(unittest.TestCase):
         self.state.status_filter = "OPEN"
         tickets = {record["ticket"] for record in self.state.filtered_records}
         self.assertEqual(tickets, {"ACTIVE", "EXTENDED"})
+
+    def test_em_dash_settlement_placeholder_does_not_hide_active_record(self):
+        active = self.records[0]
+        self.assertEqual(active["date_settled"], "—")
+        self.assertTrue(_ledger_record_matches(active, "OPEN", ""))
+
+    def test_extended_payment_date_is_not_normalized_as_settlement_date(self):
+        extended = self.records[1]
+        self.assertEqual(extended["payment_date"], "2026-10-03")
+        self.assertEqual(extended["date_settled"], "—")
+        self.assertTrue(_ledger_record_matches(extended, "OPEN", ""))
+
+    def test_settlement_date_normalization_preserves_settled_payment_fallback(
+        self,
+    ):
+        self.assertEqual(
+            _record_date_settled({"Payment Date": "2026-10-03"}, "Settled"),
+            "2026-10-03",
+        )
+        self.assertEqual(
+            _record_date_settled(
+                {"Date Settled": "2026-09-29", "Payment Date": "2026-10-03"},
+                "Settled",
+            ),
+            "2026-09-29",
+        )
+
+    def test_real_settlement_marker_excludes_open_status_even_if_active(self):
+        stale_settled = next(
+            record
+            for record in self.records
+            if record["ticket"] == "STALE-SETTLED"
+        )
+        self.assertFalse(_ledger_record_matches(stale_settled, "OPEN", ""))
 
     def test_all_statuses_shows_every_source_record(self):
         self.state.status_filter = "ALL"
